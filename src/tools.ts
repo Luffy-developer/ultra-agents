@@ -203,8 +203,15 @@ export const TOOLS: Tool[] = [
   },
 ];
 
-// 转成 OpenAI 接口需要的格式
-export const TOOL_SCHEMAS: ChatCompletionFunctionTool[] = TOOLS.map((t) => ({
-  type: "function",
-  function: { name: t.name, description: t.description, parameters: t.parameters },
-}));
+// 启动后再加进来的工具（比如 MCP 服务器提供的工具）
+export function registerTools(tools: Tool[]) {
+  TOOLS.push(...tools);
+}
+
+// 转成 OpenAI 接口需要的格式。每次调用模型时现算，这样新加的工具也能被模型看到
+export function toolSchemas(): ChatCompletionFunctionTool[] {
+  return TOOLS.map((t) => ({
+    type: "function",
+    function: { name: t.name, description: t.description, parameters: t.parameters },
+  }));
+}

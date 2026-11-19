@@ -1,4 +1,4 @@
-// 子 Agent：出题官（第 9 课：把另一个 Agent 包装成工具）
+// 子 Agent：出题官（第 10 课：把另一个 Agent 包装成工具）
 import type { ToolContext } from "./tools.js";
 import { getProgress, readLesson } from "./tools.js";
 
