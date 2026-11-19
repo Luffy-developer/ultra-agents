@@ -1,6 +1,7 @@
 // 子 Agent：出题官（第 10 课：把另一个 Agent 包装成工具）
+import { getProgress } from "./memory.js";
 import type { ToolContext } from "./tools.js";
-import { getProgress, readLesson } from "./tools.js";
+import { readLesson } from "./tools.js";
 
 const QUIZ_PROMPT = `你是一位「出题官」，只负责根据讲义给小白出题，不负责讲课。
 要求：
@@ -24,7 +25,7 @@ export async function generateQuiz(filename: string, ctx: ToolContext) {
           role: "user",
           content:
             `学生水平：${progress.level}\n` +
-            `学生薄弱点：${progress.notes.join("；") || "暂无"}\n` +
+            `学生薄弱点和特点：${progress.memories.map((m) => m.content).join("；") || "暂无"}\n` +
             `讲义：\n${lesson.content}`,
         },
       ],

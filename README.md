@@ -42,12 +42,23 @@ agent-tutor
 | 操作 | 说明 |
 |---|---|
 | `/progress` | 查看学习进度 |
-| `/clear` | 开始新对话（学习进度不会丢） |
+| `/memory` | 查看导师记住了你什么，以及你写的 TUTOR.md |
+| `/clear` | 开始新对话（学习进度和记忆不会丢，之前的对话会保存） |
+| `/resume` | 从历史对话里挑一个接着聊 |
+| `/compact` | 把当前对话压缩成摘要（对话太长时也会自动压缩） |
 | `/setup` | 修改模型和搜索服务配置 |
 | `/mcp` | 查看已连接的 MCP 服务器和工具 |
 | `/help` | 帮助 |
 | `/exit` 或 Ctrl+D | 退出 |
 | Ctrl+C | 打断正在进行的回答 |
+
+想接着上次的对话聊：`agent-tutor --continue`（或 `-c`）。
+
+### 说明文件 TUTOR.md（可选）
+
+像 Claude Code 的 `CLAUDE.md` 一样，写下你希望导师怎么教你，导师每次开始新对话时都会读：
+- `~/.agent-tutor/TUTOR.md`：对所有目录生效
+- 练习目录里的 `TUTOR.md`：只对这个目录生效
 
 导师写文件、运行命令前都会问你「允许吗？」：`y` 允许一次，`a` 本次对话都允许，`n` 拒绝。
 文件操作只能在启动时所在的目录（练习目录）里进行。
@@ -84,8 +95,10 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 | 文件 | 作用 |
 |---|---|
 | `src/index.ts` | 命令行入口：读配置、对话循环、斜杠命令、Ctrl+C 打断 |
-| `src/agent.ts` | Agent 本体：导师人设（System Prompt）+ Agent 循环（`runTurn`，流式输出）+ 短期记忆裁剪 |
-| `src/tools.ts` | 工具清单：学习进度、课程讲义、练习目录里的文件和命令，并注册出题官和网页工具 |
+| `src/agent.ts` | Agent 本体：导师人设（System Prompt）+ Agent 循环（`runTurn`，流式输出）+ 对话压缩 |
+| `src/memory.ts` | 长期记忆：学习进度、可增删改的记忆条目、读取 TUTOR.md |
+| `src/session.ts` | 会话存档与恢复 |
+| `src/tools.ts` | 工具清单：学习进度与记忆、课程讲义、练习目录里的文件和命令，并注册出题官和网页工具 |
 | `src/quiz.ts` | 子 Agent「出题官」，被包装成 `generate_quiz` 工具 |
 | `src/web.ts` | 网页工具：`web_search` 调用搜索 API，`web_fetch` 读取网页正文 |
 | `src/mcp.ts` | MCP 客户端：连接 MCP 服务器，把它们的工具接进导师的工具列表 |
@@ -93,10 +106,14 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 | `src/ui.ts` | 终端显示：颜色、工具调用提示、权限确认 |
 | `lessons/` | 课程讲义，导师通过 `read_lesson` 读取，可自行增改（改完直接生效，不用重新编译） |
 
-数据目录 `~/.agent-tutor/`：`config.json`（模型配置）、`mcp.json`（MCP 服务器，可选）、`progress.json`（学习进度，删掉即可重新开始）。
+数据目录 `~/.agent-tutor/`：
+- `config.json`：模型和搜索服务配置
+- `mcp.json`：MCP 服务器（可选）
+- `TUTOR.md`：你写给导师的说明（可选）
+- `progress.json`：学习进度和导师对你的记忆（删掉即可从头开始）
+- `sessions/`：对话存档，只保留最近 30 个
 
 ## 后续可以做的
 1. 准备一组测试提问，做自动化评估（第 11 课）
 2. 课程多了以后，把 `read_lesson` 升级为向量检索（RAG，第 7 课）
-3. 更像 Claude Code：读取练习目录里的说明文件、对话自动总结压缩、会话保存与恢复
-4. 发布到 npm，让别人 `npm install -g agent-tutor` 就能用
+3. 发布到 npm，让别人 `npm install -g agent-tutor` 就能用

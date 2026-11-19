@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type OpenAI from "openai";
 import type { ChatCompletionFunctionTool } from "openai/resources/chat/completions";
-import { DATA_DIR } from "./config.js";
+import { forget, progressForModel, remember, saveProgress, updateMemory } from "./memory.js";
 import { generateQuiz } from "./quiz.js";
 import { type SearchConfig, webFetch, webSearch } from "./web.js";
 
@@ -30,30 +30,6 @@ const MAX_OUTPUT = 8000; // 工具结果太长会撑爆上下文，截断
 
 function truncate(text: string) {
   return text.length > MAX_OUTPUT ? text.slice(0, MAX_OUTPUT) + "\n…（内容过长，已截断）" : text;
-}
-
-// ---------- 学习进度（长期记忆，第 6 课） ----------
-const PROGRESS_FILE = join(DATA_DIR, "progress.json");
-
-export interface Progress {
-  level: string;
-  completed: string[];
-  notes: string[];
-}
-
-export function getProgress(): Progress {
-  if (!existsSync(PROGRESS_FILE)) return { level: "未评估", completed: [], notes: [] };
-  return JSON.parse(readFileSync(PROGRESS_FILE, "utf-8"));
-}
-
-function saveProgress(args: { level?: string; completed_topic?: string; note?: string }) {
-  const p = getProgress();
-  if (args.level) p.level = args.level;
-  if (args.completed_topic && !p.completed.includes(args.completed_topic)) p.completed.push(args.completed_topic);
-  if (args.note) p.notes.push(args.note);
-  mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
-  return { ok: true };
 }
 
 // ---------- 课程讲义（随工具一起发布，在包的 lessons/ 目录） ----------
@@ -119,22 +95,43 @@ const str = (description: string) => ({ type: "string", description });
 export const TOOLS: Tool[] = [
   {
     name: "get_progress",
-    description: "读取学生的学习进度和水平",
+    description: "读取学生的水平、已学完的课程，以及你之前记下的关于这个学生的记忆（每条有 id）",
     parameters: { type: "object", properties: {} },
-    run: getProgress,
+    run: progressForModel,
   },
   {
     name: "save_progress",
-    description: "更新学生进度：评估出的水平、刚完成的课题、学习笔记",
+    description: "更新学生的水平，或记录刚学完的课程",
     parameters: {
       type: "object",
       properties: {
         level: str("如：零基础/入门/进阶"),
         completed_topic: str("刚学完的课程文件名"),
-        note: str("学生的薄弱点或备注"),
       },
     },
     run: saveProgress,
+  },
+  {
+    name: "remember",
+    description: "记下一条关于学生的新记忆（薄弱点、喜好、学习习惯等），以后上课都能用上。先看看有没有相近的旧记忆，有的话用 update_memory 改写，不要重复记",
+    parameters: { type: "object", properties: { content: str("一句话写清楚，如：怕看长代码，代码要逐行讲") }, required: ["content"] },
+    run: remember,
+  },
+  {
+    name: "update_memory",
+    description: "改写一条已有的记忆：情况变了（比如学生已经不怕代码了），或者要把几条相近的记忆合并成一条",
+    parameters: {
+      type: "object",
+      properties: { id: str("记忆的 id，如 m3"), content: str("改写后的完整内容") },
+      required: ["id", "content"],
+    },
+    run: updateMemory,
+  },
+  {
+    name: "forget",
+    description: "删掉一条已经过时、错误，或者已经合并进别的记忆里的记忆",
+    parameters: { type: "object", properties: { id: str("记忆的 id，如 m3") }, required: ["id"] },
+    run: forget,
   },
   {
     name: "list_lessons",

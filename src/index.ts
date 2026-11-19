@@ -4,10 +4,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import OpenAI from "openai";
-import { runTurn, systemPrompt, trimHistory, type Message } from "./agent.js";
-import { type Config, isComplete, loadConfig, runSetup, searchConfig } from "./config.js";
+import { compactHistory, needsCompaction, runTurn, systemPrompt, trimHistory, type Message } from "./agent.js";
+import { type Config, DATA_DIR, isComplete, loadConfig, runSetup, searchConfig } from "./config.js";
 import { closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses } from "./mcp.js";
-import { getProgress, listLessons, registerTools, type ToolContext } from "./tools.js";
+import { getProgress, instructionFiles } from "./memory.js";
+import { cleanupSessions, latestSession, listSessions, loadSession, newSessionId, saveSession } from "./session.js";
+import { listLessons, registerTools, type ToolContext } from "./tools.js";
 import { c, newline, printConfirm, printToolCall, write } from "./ui.js";
 import { webSearch } from "./web.js";
 
@@ -16,12 +18,16 @@ const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.u
 const HELP = `
 命令：
   /progress  查看学习进度
-  /clear     开始新对话（学习进度不会丢）
+  /memory    查看导师记住了你什么，以及你写的 TUTOR.md
+  /clear     开始新对话（学习进度和记忆不会丢）
+  /resume    从历史对话里挑一个接着聊
+  /compact   把当前对话压缩成摘要（对话很长、回答变慢时用）
   /setup     修改模型和搜索服务配置
   /mcp       查看已连接的 MCP 服务器和工具
   /help      显示帮助
   /exit      退出（也可以按 Ctrl+D）
-正在回答时按 Ctrl+C 可以打断。`;
+正在回答时按 Ctrl+C 可以打断。
+启动参数：agent-tutor --continue 接着这个目录里上次的对话`;
 
 function explainError(e: unknown) {
   if (e instanceof OpenAI.APIError) {
@@ -39,7 +45,30 @@ function showProgress() {
   for (const lesson of listLessons()) {
     write(`  ${p.completed.includes(lesson) ? c.green("✓") : c.dim("○")} ${lesson.replace(/\.md$/, "")}\n`);
   }
-  if (p.notes.length) write(c.dim(`备注：${p.notes.join("；")}\n`));
+  write(c.dim(`导师记住了你 ${p.memories.length} 件事，输入 /memory 查看\n`));
+}
+
+function showMemory(cwd: string) {
+  const p = getProgress();
+  write(c.bold("\n导师对你的记忆") + c.dim("（导师上课时会自动新增、修改、合并）\n"));
+  if (p.memories.length === 0) write(c.dim("  还没有\n"));
+  for (const m of p.memories) write(`  ${c.dim(m.id)} ${m.content} ${c.dim(m.updated)}\n`);
+  write(c.dim(`想让导师忘掉某条，直接跟它说"忘掉 m1"就行\n`));
+
+  const files = instructionFiles(cwd);
+  write(c.bold("\n你写的说明文件 TUTOR.md") + c.dim("（导师只读不改，每次开始新对话时读取）\n"));
+  if (files.length === 0) {
+    write(c.dim(`  还没有。可以新建 ${DATA_DIR}/TUTOR.md（对所有目录生效）\n`));
+    write(c.dim(`  或 ${cwd}/TUTOR.md（只对这个练习目录生效），写下你希望导师怎么教你，比如：\n`));
+    write(c.dim("    - 多用做饭的例子打比方\n    - 每讲完一个知识点，先让我用自己的话复述一遍\n"));
+  }
+  for (const f of files) write(`  ${c.green("✓")} ${f}\n`);
+}
+
+function formatTime(iso: string) {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 // agent-tutor --test-search 关键词：不启动导师，直接检查搜索服务和 key 能不能用
@@ -121,9 +150,53 @@ async function main() {
   let client = makeClient(config as Config);
 
   const cwd = process.cwd();
-  const newConversation = (): Message[] => [{ role: "system", content: systemPrompt(cwd) }];
+  // system 消息每次都重新生成：这样改了 TUTOR.md 或升级了导师规则，恢复旧对话时也会用上最新的
+  const newConversation = (history: Message[] = []): Message[] => [{ role: "system", content: systemPrompt(cwd) }, ...history];
   let messages = newConversation();
+  let sessionId = newSessionId();
   const alwaysAllowed = new Set<string>(); // 学生选了"本次都允许"的工具
+  cleanupSessions();
+
+  function resume(id: string) {
+    const session = loadSession(id);
+    if (!session) return false;
+    messages = newConversation(session.messages);
+    sessionId = session.id;
+    alwaysAllowed.clear();
+    const lastReply = [...session.messages].reverse().find((m) => m.role === "assistant" && typeof m.content === "string" && m.content);
+    write(c.dim(`\n已恢复 ${formatTime(session.updated)} 的对话「${session.title}」\n`));
+    if (lastReply) write(c.dim(`导师上次说到：${String(lastReply.content).replace(/\s+/g, " ").slice(-120)}\n`));
+    return true;
+  }
+
+  async function pickSession() {
+    const sessions = listSessions().slice(0, 10);
+    if (sessions.length === 0) return write(c.dim("还没有保存过的对话。\n"));
+    write("\n最近的对话：\n");
+    sessions.forEach((s, i) => {
+      const here = s.cwd === cwd ? "" : c.dim(`  （在 ${s.cwd}）`);
+      write(`  ${c.bold(String(i + 1))}. ${formatTime(s.updated)}  ${s.title}  ${c.dim(`${s.turns} 轮`)}${here}\n`);
+    });
+    const answer = (await rl.question("输入序号恢复，直接回车取消：")).trim();
+    const picked = sessions[Number(answer) - 1];
+    if (picked) resume(picked.id);
+  }
+
+  // 压缩对话：失败时退回到直接丢弃最早的内容
+  async function compact(signal: AbortSignal, manual: boolean) {
+    write(c.dim(manual ? "正在压缩对话……\n" : "\n对话有点长了，正在把旧内容整理成摘要……\n"));
+    try {
+      const count = await compactHistory(messages, { client, model: config.model!, signal });
+      if (count === 0 && manual) write(c.dim("对话还很短，不用压缩。\n"));
+      if (count > 0) write(c.dim(`已把 ${count} 条旧消息压缩成一份摘要，最近的对话保留原文。\n`));
+      if (needsCompaction(messages)) trimHistory(messages); // 还是太长（很少见），只能丢掉最早的内容
+    } catch (e) {
+      if (signal.aborted) throw e;
+      trimHistory(messages);
+      write(c.yellow(`压缩失败（${explainError(e)}），已直接丢掉最早的几轮对话。\n`));
+    }
+    saveSession(sessionId, cwd, messages);
+  }
 
   // Ctrl+C：正在回答时打断这一轮；空闲时退出
   let controller: AbortController | null = null;
@@ -147,7 +220,13 @@ async function main() {
   write(c.dim(`模型：${config.model}    网页搜索：${search ? search.provider : "未开启（/setup 配置）"}\n`));
   write(c.dim("MCP：") + mcpSummary + "\n");
   write(c.dim(`练习目录：${cwd}\n`));
+  if (instructionFiles(cwd).length) write(c.dim(`已读取你的说明文件 TUTOR.md\n`));
   write(c.dim("输入 /help 查看命令。试着说：你好，我想学 AI Agent\n"));
+
+  if (process.argv.includes("--continue") || process.argv.includes("-c")) {
+    const last = latestSession(cwd);
+    if (!last || !resume(last.id)) write(c.dim("\n这个目录里还没有保存过的对话，开始新对话。\n"));
+  }
 
   while (true) {
     let input: string;
@@ -165,10 +244,22 @@ async function main() {
       else if (cmd === "help") write(HELP + "\n");
       else if (cmd === "progress") showProgress();
       else if (cmd === "mcp") showMcp();
-      else if (cmd === "clear") {
+      else if (cmd === "memory") showMemory(cwd);
+      else if (cmd === "resume") await pickSession();
+      else if (cmd === "compact") {
+        controller = new AbortController();
+        try {
+          await compact(controller.signal, true);
+        } catch {
+          write(c.yellow("（已取消）\n"));
+        } finally {
+          controller = null;
+        }
+      } else if (cmd === "clear") {
         messages = newConversation();
+        sessionId = newSessionId();
         alwaysAllowed.clear();
-        write(c.dim("已开始新对话。\n"));
+        write(c.dim("已开始新对话（之前的对话已保存，可以用 /resume 找回）。\n"));
       } else if (cmd === "setup") {
         config = await runSetup(rl);
         client = makeClient(config as Config);
@@ -176,10 +267,18 @@ async function main() {
       continue;
     }
 
-    trimHistory(messages);
+    controller = new AbortController();
+    if (needsCompaction(messages)) {
+      try {
+        await compact(controller.signal, false);
+      } catch {
+        write(c.yellow("（已取消）\n"));
+        controller = null;
+        continue;
+      }
+    }
     const before = messages.length;
     messages.push({ role: "user", content: input });
-    controller = new AbortController();
     const ctx: ToolContext = {
       client,
       model: config.model!,
@@ -193,6 +292,7 @@ async function main() {
     try {
       await runTurn(messages, ctx, { onText: write, onToolCall: printToolCall });
       newline();
+      saveSession(sessionId, cwd, messages); // 每说完一轮就存档
     } catch (e) {
       messages.length = before; // 回滚这一轮，保证对话历史完整
       newline();
