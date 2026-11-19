@@ -1,0 +1,11 @@
+# 依赖和编译产物：可以随时用 npm install / npm run build 重新生成，不用存
+node_modules/
+dist/
+
+# 敏感信息：key 只放在 ~/.agent-tutor/config.json，绝不提交
+.env
+.env.*
+
+# 系统和编辑器自动生成的文件
+.DS_Store
+*.log
