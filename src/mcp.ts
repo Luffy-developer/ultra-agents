@@ -38,7 +38,7 @@ type ServerConfig = StdioServerConfig | HttpServerConfig;
 export interface McpServerStatus {
   name: string;
   ok: boolean;
-  tools: string[]; // 这个服务器提供的工具（原名）
+  tools: { name: string; description: string }[]; // 这个服务器提供的工具（原名和说明）
   error?: string;
 }
 
@@ -156,7 +156,7 @@ async function connectServer(name: string, cfg: ServerConfig, version: string) {
       return formatResult(result);
     },
   }));
-  return { tools, names: mcpTools.map((t) => t.name) };
+  return { tools, info: mcpTools.map((t) => ({ name: t.name, description: (t.description ?? "").replace(/\s+/g, " ").trim() })) };
 }
 
 // 启动时连接所有配置好的 MCP 服务器（同时连接，某个失败不影响其他的）
@@ -169,7 +169,7 @@ export async function connectMcpServers(version: string): Promise<{ statuses: Mc
         if (!("url" in cfg) && !cfg.command) throw new Error("配置里缺少 command 或 url");
         const server = await connectServer(name, cfg, version);
         tools.push(...server.tools);
-        return { name, ok: true, tools: server.names };
+        return { name, ok: true, tools: server.info };
       } catch (e) {
         return { name, ok: false, tools: [], error: e instanceof Error ? e.message : String(e) };
       }

@@ -6,28 +6,17 @@ import { createInterface } from "node:readline/promises";
 import OpenAI from "openai";
 import { compactHistory, needsCompaction, runTurn, systemPrompt, trimHistory, type Message } from "./agent.js";
 import { type Config, DATA_DIR, isComplete, loadConfig, runSetup, searchConfig } from "./config.js";
+import { formatTime, helpText, recentSessions, suggestCommands } from "./commands.js";
+import { attachCompletion } from "./input.js";
+import { MarkdownStream, plainText } from "./markdown.js";
 import { closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses } from "./mcp.js";
 import { getProgress, instructionFiles } from "./memory.js";
-import { cleanupSessions, latestSession, listSessions, loadSession, newSessionId, saveSession } from "./session.js";
+import { cleanupSessions, latestSession, loadSession, newSessionId, saveSession } from "./session.js";
 import { listLessons, registerTools, type ToolContext } from "./tools.js";
-import { c, newline, printConfirm, printToolCall, write } from "./ui.js";
+import { c, newline, printConfirm, printToolCall, textWidth, write } from "./ui.js";
 import { webSearch } from "./web.js";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
-
-const HELP = `
-命令：
-  /progress  查看学习进度
-  /memory    查看导师记住了你什么，以及你写的 TUTOR.md
-  /clear     开始新对话（学习进度和记忆不会丢）
-  /resume    从历史对话里挑一个接着聊
-  /compact   把当前对话压缩成摘要（对话很长、回答变慢时用）
-  /setup     修改模型和搜索服务配置
-  /mcp       查看已连接的 MCP 服务器和工具
-  /help      显示帮助
-  /exit      退出（也可以按 Ctrl+D）
-正在回答时按 Ctrl+C 可以打断。
-启动参数：agent-tutor --continue 接着这个目录里上次的对话`;
 
 function explainError(e: unknown) {
   if (e instanceof OpenAI.APIError) {
@@ -65,12 +54,6 @@ function showMemory(cwd: string) {
   for (const f of files) write(`  ${c.green("✓")} ${f}\n`);
 }
 
-function formatTime(iso: string) {
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 // agent-tutor --test-search 关键词：不启动导师，直接检查搜索服务和 key 能不能用
 async function testSearch(query: string) {
   const search = searchConfig(loadConfig());
@@ -103,17 +86,26 @@ const MCP_EXAMPLE = `{
   }
 }`;
 
-function showMcp() {
+function showMcp(name?: string) {
   const statuses = mcpStatuses();
+  if (name) {
+    const server = statuses.find((s) => s.name === name);
+    if (!server) return write(c.red(`没有叫 ${name} 的 MCP 服务器，输入 /mcp 查看全部`) + "\n");
+    if (!server.ok) return write(`${c.red("✗")} ${c.bold(server.name)} ${c.red("连接失败：" + server.error)}\n`);
+    write(`\n${c.green("✓")} ${c.bold(server.name)} ${c.dim(`共 ${server.tools.length} 个工具（导师调用时名字是 mcp__${server.name}__工具名）`)}\n`);
+    for (const t of server.tools) write(`  ${c.cyan(t.name)}  ${c.dim(t.description || "（没有说明）")}\n`);
+    return;
+  }
   write(c.dim(`\n配置文件：${MCP_CONFIG_FILE}（修改后重启 agent-tutor 生效）\n`));
   if (statuses.length === 0) {
     write(`还没有配置 MCP 服务器。在配置文件里按这个格式填写（和 Claude Code 的格式一样）：\n${c.dim(MCP_EXAMPLE)}\n`);
     return;
   }
   for (const s of statuses) {
-    if (s.ok) write(`${c.green("✓")} ${c.bold(s.name)} ${c.dim(`${s.tools.length} 个工具：${s.tools.join("、")}`)}\n`);
+    if (s.ok) write(`${c.green("✓")} ${c.bold(s.name)} ${c.dim(`${s.tools.length} 个工具：${s.tools.map((t) => t.name).join("、")}`)}\n`);
     else write(`${c.red("✗")} ${c.bold(s.name)} ${c.red("连接失败：" + s.error)}\n`);
   }
+  write(c.dim("输入 /mcp 服务器名 查看每个工具的说明\n"));
 }
 
 // 启动时连接 MCP 服务器，把它们的工具加进导师的工具列表
@@ -135,7 +127,9 @@ async function main() {
   const testIndex = process.argv.indexOf("--test-search");
   if (testIndex !== -1) return testSearch(process.argv.slice(testIndex + 1).join(" ") || "AI Agent 是什么");
 
-  const rl = createInterface({ input: stdin, output: stdout });
+  // escapeCodeTimeout：单独按 Esc 时，终端要等一会儿才能确定不是方向键等组合键的开头，默认等 500 毫秒，太慢了
+  const rl = createInterface({ input: stdin, output: stdout, escapeCodeTimeout: 50 });
+  const completion = attachCompletion(rl, suggestCommands);
   let closed = false;
   rl.on("close", async () => {
     closed = true;
@@ -165,13 +159,19 @@ async function main() {
     alwaysAllowed.clear();
     const lastReply = [...session.messages].reverse().find((m) => m.role === "assistant" && typeof m.content === "string" && m.content);
     write(c.dim(`\n已恢复 ${formatTime(session.updated)} 的对话「${session.title}」\n`));
-    if (lastReply) write(c.dim(`导师上次说到：${String(lastReply.content).replace(/\s+/g, " ").slice(-120)}\n`));
+    if (lastReply) write(c.dim(`导师上次说到：${plainText(String(lastReply.content)).slice(-120)}\n`));
     return true;
   }
 
-  async function pickSession() {
-    const sessions = listSessions().slice(0, 10);
+  async function pickSession(arg: string) {
+    const sessions = recentSessions();
     if (sessions.length === 0) return write(c.dim("还没有保存过的对话。\n"));
+    if (arg) {
+      const picked = sessions[Number(arg) - 1];
+      if (picked) resume(picked.id);
+      else write(c.red(`没有第 ${arg} 个对话，输入 /resume 查看列表`) + "\n");
+      return;
+    }
     write("\n最近的对话：\n");
     sessions.forEach((s, i) => {
       const here = s.cwd === cwd ? "" : c.dim(`  （在 ${s.cwd}）`);
@@ -231,7 +231,9 @@ async function main() {
   while (true) {
     let input: string;
     try {
+      completion.enable();
       input = (await rl.question(c.bold(c.green("\n你 › ")))).trim();
+      completion.disable();
     } catch (e) {
       if (closed) return; // 正在退出（在关闭 MCP 服务器），不再等输入
       throw e;
@@ -239,13 +241,15 @@ async function main() {
     if (!input) continue;
 
     if (input.startsWith("/")) {
-      const cmd = input.slice(1).toLowerCase();
+      const [name, ...rest] = input.slice(1).split(/\s+/);
+      const cmd = name.toLowerCase();
+      const arg = rest.join(" ");
       if (cmd === "exit" || cmd === "quit") rl.close();
-      else if (cmd === "help") write(HELP + "\n");
+      else if (cmd === "help") write("\n" + helpText() + "\n");
       else if (cmd === "progress") showProgress();
-      else if (cmd === "mcp") showMcp();
+      else if (cmd === "mcp") showMcp(arg);
       else if (cmd === "memory") showMemory(cwd);
-      else if (cmd === "resume") await pickSession();
+      else if (cmd === "resume") await pickSession(arg);
       else if (cmd === "compact") {
         controller = new AbortController();
         try {
@@ -288,13 +292,24 @@ async function main() {
       search: searchConfig(config),
     };
 
-    write(c.bold(c.cyan("\n导师 › ")));
+    const prefix = "导师 › ";
+    write("\n" + c.bold(c.cyan(prefix)));
+    const md = new MarkdownStream(write, textWidth(prefix));
+    const events = {
+      onText: (delta: string) => md.push(delta),
+      onToolCall: (name: string, args: string) => {
+        md.flush(); // 先把已经说的话显示完，再显示工具调用提示
+        printToolCall(name, args);
+      },
+    };
     try {
-      await runTurn(messages, ctx, { onText: write, onToolCall: printToolCall });
+      await runTurn(messages, ctx, events);
+      md.flush();
       newline();
       saveSession(sessionId, cwd, messages); // 每说完一轮就存档
     } catch (e) {
       messages.length = before; // 回滚这一轮，保证对话历史完整
+      md.flush();
       newline();
       if (controller.signal.aborted) write(c.yellow("（已打断，可以重新说）\n"));
       else write(c.red(`出错了：${explainError(e)}`) + "\n");
