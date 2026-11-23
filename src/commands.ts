@@ -3,6 +3,7 @@
 import type { Suggestion } from "./input.js";
 import { mcpStatuses } from "./mcp.js";
 import { listSessions } from "./session.js";
+import { loadAgents } from "./subagents.js";
 
 export interface Command {
   name: string;
@@ -49,6 +50,17 @@ export const COMMANDS: Command[] = [
         value: `/mcp ${s.name}`,
         label: s.name,
         description: s.ok ? `${s.tools.length} 个工具：${s.tools.map((t) => t.name).join("、")}` : `连接失败：${s.error}`,
+      })),
+  },
+  {
+    name: "agents",
+    description: "查看导师可以派出的子 Agent，以及怎么自定义",
+    argHint: "[名字]",
+    args: () =>
+      loadAgents(process.cwd()).agents.map((a) => ({
+        value: `/agents ${a.name}`,
+        label: a.name,
+        description: a.description,
       })),
   },
   { name: "setup", description: "修改模型和搜索服务配置" },

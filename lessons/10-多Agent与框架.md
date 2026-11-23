@@ -13,10 +13,32 @@
 多 Agent = 招几个人分工，店长负责协调。
 
 ## 看看本项目
-导师的小测验就是另一个 Agent 出的！打开 agent-tutor 源码里的 `src/quiz.ts`：
-- 出题官有**自己的人设**（`QUIZ_PROMPT`）和**自己的 messages**，看不到你和导师的聊天记录
-- 它被包装成 `generate_quiz` 工具（注册在 `src/tools.ts`），导师需要出题时就调用它
-- 终端里出现「🔧 generate_quiz」，就是导师把活儿交给了出题官
+导师就是一个「主 Agent」，它有一个特别的工具 `task`，专门用来派**子 Agent**干活（和 Claude Code 的做法一样）。
+打开 agent-tutor 源码里的 `src/subagents.ts`：
+- 每个子 Agent 有**自己的人设**和**自己的 messages**，看不到你和导师的聊天记录，所以导师派活时要把任务写清楚
+- 每个子 Agent **只能用分配给它的工具**：出题官只能读讲义，调研员只能上网，谁都不能再派子 Agent（防止无限套娃）
+- 子 Agent 自己跑一遍完整的 Agent 循环（就是第 5 课的 `runTurn`），做完**只把结论交回给导师**，
+  中间搜到的十几个网页不会塞进导师的对话里——这是拆分子 Agent 最大的好处：**隔离上下文**
+- 导师在同一步里派出好几个子 Agent，它们会**同时开工**，比一个一个来快
+- 终端里出现「🤖 派出子 Agent」，下面缩进的 ⎿ 行就是子 Agent 在用的工具
+
+内置了三个子 Agent：出题官 `quiz-maker`、调研员 `researcher`、通用助手 `general-purpose`。
+输入 `/agents` 查看；你还可以在 `~/.agent-tutor/agents/` 里写一个 Markdown 文件，定义自己的子 Agent：
+
+```markdown
+---
+name: code-reviewer
+description: 代码检查员：检查学生写的代码有没有错误
+tools: read_file, list_files
+---
+你是代码检查员。先用 list_files 找到文件，再用 read_file 读代码，逐个指出问题。
+```
+
+`description` 很重要：导师就是看它来决定什么时候派这个子 Agent 的（和工具说明的作用一样）。
+
+## 什么时候该拆子 Agent
+- 适合：任务独立、步骤多、过程不重要只要结果（查资料、跑通一段代码、检查一批文件）
+- 不适合：简单的一两步小事（派活本身也要花时间和 token），或者需要和学生来回商量的事
 
 ## 框架
 - 常见框架：LangChain / LangGraph、LlamaIndex、AutoGen、CrewAI、OpenAI Agents SDK 等。

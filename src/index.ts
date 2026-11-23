@@ -12,6 +12,7 @@ import { MarkdownStream, plainText } from "./markdown.js";
 import { closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses } from "./mcp.js";
 import { getProgress, instructionFiles } from "./memory.js";
 import { cleanupSessions, latestSession, loadSession, newSessionId, saveSession } from "./session.js";
+import { agentDirs, loadAgents, taskTool, toolsFor } from "./subagents.js";
 import { listLessons, registerTools, type ToolContext } from "./tools.js";
 import { c, newline, printConfirm, printToolCall, textWidth, write } from "./ui.js";
 import { webSearch } from "./web.js";
@@ -106,6 +107,33 @@ function showMcp(name?: string) {
     else write(`${c.red("✗")} ${c.bold(s.name)} ${c.red("连接失败：" + s.error)}\n`);
   }
   write(c.dim("输入 /mcp 服务器名 查看每个工具的说明\n"));
+}
+
+const AGENT_EXAMPLE = `---
+name: code-reviewer
+description: 代码检查员：检查学生写的代码有没有错误，用小白能懂的话指出问题
+tools: read_file, list_files
+---
+你是代码检查员。先用 list_files 找到要检查的文件，再用 read_file 读代码。
+逐个指出问题：哪一行、错在哪、怎么改。只指出问题，不要直接改文件。`;
+
+function showAgents(cwd: string, name?: string) {
+  const { agents, errors } = loadAgents(cwd);
+  if (name) {
+    const agent = agents.find((a) => a.name === name);
+    if (!agent) return write(c.red(`没有叫 ${name} 的子 Agent，输入 /agents 查看全部`) + "\n");
+    write(`\n${c.bold(agent.name)} ${c.dim(`· ${agent.source}`)}\n${agent.description}\n`);
+    write(c.dim(`模型：${agent.model ?? "和导师一样"}\n`));
+    write(c.dim(`工具：${toolsFor(agent).map((t) => t.name).join("、") || "无"}\n`));
+    write(c.dim("人设：\n") + c.dim(agent.prompt.replace(/^/gm, "  │ ")) + "\n");
+    return;
+  }
+  write(c.dim("\n导师可以把独立的任务派给这些子 Agent，它们做完只把结果交回给导师：\n"));
+  for (const a of agents) write(`  ${c.cyan(a.name)} ${c.dim(a.source === "内置" ? "（内置）" : "（自定义）")}  ${a.description}\n`);
+  for (const e of errors) write(c.red(`  ✗ ${e.path}：${e.error}`) + "\n");
+  write(c.dim(`\n输入 /agents 名字 查看人设和能用的工具。想自定义子 Agent，在下面任一目录新建一个 .md 文件（改完不用重启）：\n`));
+  for (const dir of agentDirs(cwd)) write(c.dim(`  ${dir}\n`));
+  write(c.dim(`格式（和 Claude Code 的一样；tools 不写就能用除改记忆外的全部工具，mcp__* 表示所有 MCP 工具）：\n${AGENT_EXAMPLE}\n`));
 }
 
 // 启动时连接 MCP 服务器，把它们的工具加进导师的工具列表
@@ -203,6 +231,17 @@ async function main() {
   rl.on("SIGINT", () => (controller ? controller.abort() : rl.close()));
 
   async function confirm(toolName: string, title: string, detail: string) {
+    // 几个子 Agent 同时干活时可能同时来问，排好队一个一个问
+    const ask = confirmQueue.then(() => askConfirm(toolName, title, detail));
+    confirmQueue = ask.then(
+      () => {},
+      () => {},
+    );
+    return ask;
+  }
+  let confirmQueue = Promise.resolve();
+
+  async function askConfirm(toolName: string, title: string, detail: string) {
     if (alwaysAllowed.has(toolName)) return true;
     printConfirm(title, detail);
     const answer = (
@@ -214,6 +253,7 @@ async function main() {
     return answer === "y" || answer === "a";
   }
 
+  registerTools([taskTool(cwd)]);
   const mcpSummary = await setupMcp();
   write(`\n${c.bold("🤖 Agent 导师")} ${c.dim(`v${VERSION}`)}\n`);
   const search = searchConfig(config);
@@ -248,6 +288,7 @@ async function main() {
       else if (cmd === "help") write("\n" + helpText() + "\n");
       else if (cmd === "progress") showProgress();
       else if (cmd === "mcp") showMcp(arg);
+      else if (cmd === "agents") showAgents(cwd, arg);
       else if (cmd === "memory") showMemory(cwd);
       else if (cmd === "resume") await pickSession(arg);
       else if (cmd === "compact") {

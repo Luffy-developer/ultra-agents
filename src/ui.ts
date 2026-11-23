@@ -72,15 +72,40 @@ export function newline() {
 }
 
 // 把工具参数缩成一行，方便学生看到 Agent 在"动手"做什么
-export function printToolCall(name: string, rawArgs: string) {
+function toolSummary(rawArgs: string) {
   let summary = rawArgs;
   try {
     const args = JSON.parse(rawArgs || "{}");
     summary = args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? (Object.keys(args).length ? JSON.stringify(args) : "");
   } catch {}
-  if (summary.length > 80) summary = summary.slice(0, 80) + "…";
+  return summary.length > 80 ? summary.slice(0, 80) + "…" : summary;
+}
+
+export function printToolCall(name: string, rawArgs: string) {
   newline();
+  if (name === "task") {
+    let args: any = {};
+    try {
+      args = JSON.parse(rawArgs || "{}");
+    } catch {}
+    write(c.dim("  🤖 派出子 Agent ") + c.cyan(String(args.agent ?? "?")) + c.dim(args.description ? `：${args.description}` : "") + "\n");
+    return;
+  }
+  const summary = toolSummary(rawArgs);
   write(c.dim(`  🔧 ${name}${summary ? ` ${summary}` : ""}`) + "\n");
+}
+
+// 子 Agent 在用什么工具（几个子 Agent 同时干活时，靠前面的名字区分）
+export function printSubagentStep(agent: string, name: string, rawArgs: string) {
+  const summary = toolSummary(rawArgs);
+  newline();
+  write(c.dim(`     ⎿ ${agent} · ${name}${summary ? ` ${summary}` : ""}`) + "\n");
+}
+
+export function printSubagentDone(agent: string, steps: number, ms: number, ok: boolean) {
+  const stats = `用了 ${steps} 次工具，${Math.max(1, Math.round(ms / 1000))} 秒`;
+  newline();
+  write((ok ? c.dim(`     ⎿ ${agent} 完成（${stats}）`) : c.yellow(`     ⎿ ${agent} 没有完成（${stats}）`)) + "\n");
 }
 
 export function printConfirm(title: string, detail: string) {

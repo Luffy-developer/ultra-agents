@@ -1,7 +1,7 @@
 # agent-tutor：AI Agent 学习导师
 
 一个在终端里教小白学习 AI Agent 的 AI Agent，用法类似 Claude Code / Codex：
-在任意目录输入 `agent-tutor`，它会摸底你的水平、按课程一步步教、请「出题官」出题检验，
+在任意目录输入 `agent-tutor`，它会摸底你的水平、按课程一步步教、派「出题官」子 Agent 出题检验，
 还能在当前目录帮你创建练习文件、运行代码、上网搜索资料，并能通过 MCP 接入更多工具，带你边学边做。
 
 ## 安装
@@ -51,6 +51,7 @@ agent-tutor
 | `/compact` | 把当前对话压缩成摘要（对话太长时也会自动压缩） |
 | `/setup` | 修改模型和搜索服务配置 |
 | `/mcp [服务器名]` | 查看已连接的 MCP 服务器；加服务器名查看每个工具的说明 |
+| `/agents [名字]` | 查看导师可以派出的子 Agent；加名字查看人设和能用的工具 |
 | `/help` | 帮助 |
 | `/exit` 或 Ctrl+D | 退出 |
 | Ctrl+C | 打断正在进行的回答 |
@@ -85,6 +86,30 @@ MCP 是给 Agent 用的"标准插头"：别人写好的 MCP 服务器（地图�
 - 修改后重启 agent-tutor 生效；启动时第一屏会显示连接结果，输入 `/mcp` 查看详情
 - 每次调用 MCP 工具前都会征求你的同意。本地 MCP 服务器是在你电脑上运行的程序，只安装可信来源的
 
+### 子 Agent
+
+和 Claude Code 一样，导师（主 Agent）可以用 `task` 工具把独立的任务派给子 Agent。
+子 Agent 有自己的人设、只能用分配给它的工具、看不到你们的聊天记录，做完只把结果交回给导师；
+导师一次派出几个时，它们会同时开工。
+
+内置三个：`quiz-maker`（出题官）、`researcher`（调研员，需要配置网页搜索）、`general-purpose`（通用助手）。
+自定义子 Agent：在 `~/.agent-tutor/agents/`（所有目录生效）或练习目录的 `.agent-tutor/agents/`（只对这个目录生效）
+新建一个 `.md` 文件，格式和 Claude Code 的 `.claude/agents/*.md` 一样，改完不用重启：
+
+```markdown
+---
+name: code-reviewer
+description: 代码检查员：检查学生写的代码有没有错误，用小白能懂的话指出问题
+tools: read_file, list_files
+model: 可选，不写就和导师用同一个模型
+---
+你是代码检查员。先用 list_files 找到要检查的文件，再用 read_file 读代码，逐个指出问题。
+```
+
+- `tools` 不写就能用除了「改学生进度和记忆」以外的全部工具；`mcp__*` 表示所有 MCP 工具
+- 子 Agent 写文件、运行命令时同样会征求你的同意，并注明是哪个子 Agent 发起的
+- 和内置子 Agent 同名的会覆盖内置的
+
 ## 开发
 
 ```bash
@@ -101,8 +126,8 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 | `src/agent.ts` | Agent 本体：导师人设（System Prompt）+ Agent 循环（`runTurn`，流式输出）+ 对话压缩 |
 | `src/memory.ts` | 长期记忆：学习进度、可增删改的记忆条目、读取 TUTOR.md |
 | `src/session.ts` | 会话存档与恢复 |
-| `src/tools.ts` | 工具清单：学习进度与记忆、课程讲义、练习目录里的文件和命令，并注册出题官和网页工具 |
-| `src/quiz.ts` | 子 Agent「出题官」，被包装成 `generate_quiz` 工具 |
+| `src/tools.ts` | 工具清单：学习进度与记忆、课程讲义、练习目录里的文件和命令、网页工具 |
+| `src/subagents.ts` | 子 Agent：内置和自定义子 Agent 的定义，以及派活用的 `task` 工具 |
 | `src/web.ts` | 网页工具：`web_search` 调用搜索 API，`web_fetch` 读取网页正文 |
 | `src/mcp.ts` | MCP 客户端：连接 MCP 服务器，把它们的工具接进导师的工具列表 |
 | `src/config.ts` | 模型配置和首次运行向导 |
@@ -115,6 +140,7 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 数据目录 `~/.agent-tutor/`：
 - `config.json`：模型和搜索服务配置
 - `mcp.json`：MCP 服务器（可选）
+- `agents/`：自定义子 Agent（可选）
 - `TUTOR.md`：你写给导师的说明（可选）
 - `progress.json`：学习进度和导师对你的记忆（删掉即可从头开始）
 - `sessions/`：对话存档，只保留最近 30 个

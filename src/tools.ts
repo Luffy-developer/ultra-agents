@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import type OpenAI from "openai";
 import type { ChatCompletionFunctionTool } from "openai/resources/chat/completions";
 import { forget, progressForModel, remember, saveProgress, updateMemory } from "./memory.js";
-import { generateQuiz } from "./quiz.js";
 import { type SearchConfig, webFetch, webSearch } from "./web.js";
 
 export interface ToolContext {
@@ -24,6 +23,7 @@ export interface Tool {
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
   run(args: any, ctx: ToolContext): unknown | Promise<unknown>;
+  concurrent?: boolean; // 模型一次调用好几个时，能不能同时执行（比如派出多个子 Agent）
 }
 
 const MAX_OUTPUT = 8000; // 工具结果太长会撑爆上下文，截断
@@ -146,12 +146,6 @@ export const TOOLS: Tool[] = [
     run: (args) => readLesson(args.filename),
   },
   {
-    name: "generate_quiz",
-    description: "请出题官根据某节课的讲义和学生薄弱点出一道小测验，返回题目、参考答案和提示",
-    parameters: { type: "object", properties: { filename: str("课程文件名，如 01-大模型是什么.md") }, required: ["filename"] },
-    run: (args, ctx) => generateQuiz(args.filename, ctx),
-  },
-  {
     name: "list_files",
     description: "列出学生练习目录（或其子目录）里的文件",
     parameters: { type: "object", properties: { path: str("相对路径，默认为练习目录本身") } },
@@ -200,14 +194,14 @@ export const TOOLS: Tool[] = [
   },
 ];
 
-// 启动后再加进来的工具（比如 MCP 服务器提供的工具）
+// 启动后再加进来的工具（派子 Agent 的 task 工具、MCP 服务器提供的工具）
 export function registerTools(tools: Tool[]) {
   TOOLS.push(...tools);
 }
 
 // 转成 OpenAI 接口需要的格式。每次调用模型时现算，这样新加的工具也能被模型看到
-export function toolSchemas(): ChatCompletionFunctionTool[] {
-  return TOOLS.map((t) => ({
+export function toolSchemas(tools: Tool[] = TOOLS): ChatCompletionFunctionTool[] {
+  return tools.map((t) => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.parameters },
   }));
