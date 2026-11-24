@@ -67,6 +67,7 @@ export interface AgentEvents {
   onText(delta: string): void; // 模型一边生成一边显示（流式输出）
   onThinking?(delta: string): void; // 推理模型的思考过程
   onToolCall(name: string, args: string): void;
+  onToolResult?(name: string, result: unknown): void; // 工具执行完的结果（折叠显示时，展开才看得到）
 }
 
 const MAX_STEPS = 20; // 防止模型无限调用工具（第 5 课的小测验）
@@ -138,7 +139,10 @@ export async function runTurn(messages: Message[], ctx: ToolContext, events: Age
       const batch = calls.slice(i, end);
       for (const call of batch) events.onToolCall(call.name, call.args);
       const results = await Promise.all(batch.map((call) => runTool(call.name, call.args, ctx, tools)));
-      batch.forEach((call, k) => messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(results[k]) }));
+      batch.forEach((call, k) => {
+        events.onToolResult?.(call.name, results[k]);
+        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(results[k]) });
+      });
       i = end;
     }
   }

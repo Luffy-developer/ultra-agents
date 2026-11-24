@@ -61,6 +61,7 @@ export const termColumns = () => process.stdout.columns || 80;
 // 记录光标是否在行首，避免工具提示和文字挤在同一行
 let atLineStart = true;
 let muted = false;
+let seq = 0; // 每输出一次加 1：折叠的总结行靠它判断"自己后面有没有别的内容"，没有才能原地刷新
 
 // 自动化评估时关掉导师的各种提示（待办清单、子 Agent 进度），只显示评估结果
 export function setMuted(value: boolean) {
@@ -69,16 +70,19 @@ export function setMuted(value: boolean) {
 
 export function write(text: string) {
   if (!text || muted) return;
+  seq++;
   process.stdout.write(text);
   atLineStart = text.endsWith("\n");
 }
+
+export const writeSeq = () => seq;
 
 export function newline() {
   if (!atLineStart) write("\n");
 }
 
 // 把工具参数缩成一行，方便学生看到 Agent 在"动手"做什么
-function toolSummary(rawArgs: string) {
+export function toolSummary(rawArgs: string) {
   let summary = rawArgs;
   try {
     const args = JSON.parse(rawArgs || "{}");
@@ -97,7 +101,7 @@ export function tagLine(tag: string, text: string, indent = 2) {
 }
 
 // 一次工具调用显示成什么：[tools]update_memory 更新记忆 · m3 怕看长代码
-function describeCall(name: string, rawArgs: string, label?: string) {
+export function describeCall(name: string, rawArgs: string, label?: string) {
   const summary = toolSummary(rawArgs);
   if (name === "task") {
     let args: any = {};
@@ -109,45 +113,6 @@ function describeCall(name: string, rawArgs: string, label?: string) {
   const mcp = name.match(/^mcp__(.+?)__(.+)$/);
   if (mcp) return { tag: "mcp", text: `${mcp[1]}/${mcp[2]}${summary ? ` · ${summary}` : ""}` };
   return { tag: "tools", text: `${name}${label ? ` ${label}` : ""}${summary ? ` · ${summary}` : ""}` };
-}
-
-export function printToolCall(name: string, rawArgs: string, label?: string) {
-  if (name === "todo_write") return; // 待办清单工具自己会把清单画出来
-  const { tag, text } = describeCall(name, rawArgs, label);
-  newline();
-  write(tagLine(tag, text) + "\n");
-}
-
-// 子 Agent 在用什么工具（缩进一层；几个子 Agent 同时干活时，靠名字区分）
-export function printSubagentStep(agent: string, name: string, rawArgs: string, label?: string) {
-  const { tag, text } = describeCall(name, rawArgs, label);
-  newline();
-  write(tagLine(tag, `${agent} › ${text}`, 5) + "\n");
-}
-
-export function printSubagentDone(agent: string, steps: number, ms: number, ok: boolean) {
-  const stats = `用了 ${steps} 次工具，${Math.max(1, Math.round(ms / 1000))} 秒`;
-  newline();
-  write((ok ? tagLine("agent", `${agent} 完成（${stats}）`, 5) : c.yellow(`     ⎿ [agent]${agent} 没有完成（${stats}）`)) + "\n");
-}
-
-// 思考过程（推理模型会先"想"一段再回答，比如 DeepSeek-R1）：灰色显示，和正式回答区分开
-let thinking = false;
-
-export function printThinking(delta: string) {
-  if (!thinking) {
-    newline();
-    write(tagLine("think", "思考过程") + "\n     ");
-    thinking = true;
-  }
-  write(c.dim(delta.replace(/\n+/g, "\n     ")));
-}
-
-// 思考结束（开始正式回答或调用工具了）
-export function endThinking() {
-  if (!thinking) return;
-  thinking = false;
-  write("\n");
 }
 
 export function printConfirm(title: string, detail: string) {

@@ -12,7 +12,8 @@ import { type Config, DATA_DIR, searchConfig } from "./config.js";
 import { useInMemoryProgress } from "./memory.js";
 import { clearTodos } from "./todo.js";
 import { toolLabel, type ToolContext } from "./tools.js";
-import { c, printToolCall, setMuted } from "./ui.js";
+import * as activity from "./activity.js";
+import { c, setMuted, write } from "./ui.js";
 import { readUsage, UsageMeter, usageLine } from "./usage.js";
 
 export interface EvalCase {
@@ -136,7 +137,12 @@ async function runCase(item: EvalCase, client: OpenAI, config: Config, judgeMode
     onUsage: (model, usage) => meter.add(model, usage),
   };
   const events = {
-    onText: (delta: string) => verbose && process.stdout.write(delta),
+    onText: (delta: string) => {
+      activity.end();
+      if (verbose) write(delta); // 用 write 输出，后面的过程提示才知道要不要先换行
+    },
+    onThinking: (delta: string) => activity.thinking(delta),
+    onToolResult: (_name: string, result: unknown) => activity.toolResult(result),
     onToolCall: (name: string, rawArgs: string) => {
       tools.push(name);
       if (name === "task") {
@@ -144,7 +150,7 @@ async function runCase(item: EvalCase, client: OpenAI, config: Config, judgeMode
           tools.push(`task:${JSON.parse(rawArgs).agent}`);
         } catch {}
       }
-      if (verbose) printToolCall(name, rawArgs, toolLabel(name));
+      activity.toolCall(name, rawArgs, toolLabel(name));
     },
   };
   const messages: Message[] = [{ role: "system", content: systemPrompt(dir, item.tutor ?? "") }];
@@ -223,6 +229,7 @@ export async function runEval(config: Config, opts: { file?: string; only?: stri
   const started = Date.now();
   const results: CaseResult[] = [];
   setMuted(!opts.verbose); // 不加 -v 时，不显示导师画的待办清单、子 Agent 进度等
+  activity.setExpanded(true); // 加了 -v 时，每一步都完整显示
   for (const [i, item] of cases.entries()) {
     out(`\n${c.dim(`[${i + 1}/${cases.length}]`)} ${item.name} `);
     const result = await runCase(item, client, config, judgeModel, Boolean(opts.verbose));

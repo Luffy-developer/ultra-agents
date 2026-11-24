@@ -19,7 +19,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DATA_DIR } from "./config.js";
-import { c, newline, tagLine, write } from "./ui.js";
+import * as activity from "./activity.js";
 
 export const HOOKS_FILE = join(DATA_DIR, "hooks.json");
 export const HOOK_EVENTS = ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"] as const;
@@ -97,8 +97,7 @@ export async function runHooks(event: HookEvent, payload: HookPayload, ctx: { cw
   try {
     hooks = loadHooks()[event].filter((h) => matches(h, payload.tool));
   } catch (e) {
-    newline();
-    write(c.yellow(`  ⎿ [hook]${e instanceof Error ? e.message : e}`) + "\n");
+    activity.warn(`  ⎿ [hook]${e instanceof Error ? e.message : e}`);
     return outcome;
   }
   const file = typeof payload.args?.path === "string" ? resolve(ctx.cwd, payload.args.path) : "";
@@ -108,15 +107,15 @@ export async function runHooks(event: HookEvent, payload: HookPayload, ctx: { cw
   for (const hook of hooks) {
     const short = hook.command.length > 50 ? hook.command.slice(0, 50) + "…" : hook.command;
     const r = await exec(hook.command, input, env, ctx.cwd, ctx.signal);
-    newline();
     if (r.code === BLOCK_EXIT_CODE) {
       outcome.blocked = r.stderr || r.stdout || `被 hook 拦下了（${short}）`;
-      write(c.yellow(`  ⎿ [hook]${event}${payload.tool ? ` 拦下了 ${payload.tool}` : " 拦下了这次操作"}：${outcome.blocked.split("\n")[0]}`) + "\n");
+      activity.warn(`  ⎿ [hook]${event}${payload.tool ? ` 拦下了 ${payload.tool}` : " 拦下了这次操作"}：${outcome.blocked.split("\n")[0]}`);
       return outcome; // 已经拦下了，后面的 hooks 不用再跑
     }
-    write(tagLine("hook", `${event} · ${short}${r.code === 0 ? "" : c.yellow(`（出错了，退出码 ${r.code}）`)}`) + "\n");
+    // hook 的输出平时折叠，展开才看得到；出错了要让学生看到
     const shown = r.code === 0 ? r.stdout : r.stderr || r.stdout;
-    if (shown) write(c.dim(shown.split("\n").slice(0, 5).map((l) => `     ${l}`).join("\n")) + "\n");
+    if (r.code === 0) activity.note("hook", `${event} · ${short}`, 2, shown.split("\n").slice(0, 5).join("\n") || undefined);
+    else activity.warn(`  ⎿ [hook]${event} · ${short} 出错了（退出码 ${r.code}）${shown ? "：" + shown.split("\n")[0] : ""}`);
     if (r.code === 0 && r.stdout) outcome.output.push(r.stdout);
   }
   return outcome;

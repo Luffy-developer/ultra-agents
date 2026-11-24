@@ -3,6 +3,7 @@
 // 清单属于当前这段对话：/clear 时清空，恢复旧对话时从对话记录里还原
 import type { Message } from "./agent.js";
 import type { Tool } from "./tools.js";
+import * as activity from "./activity.js";
 import { c, newline, tagLine, write } from "./ui.js";
 
 export interface Todo {
@@ -22,6 +23,7 @@ export function clearTodos() {
 }
 
 export function printTodos(list = todos) {
+  activity.end(); // 待办清单要让学生看到，先把折叠的总结行定下来
   newline();
   if (list.length === 0) return write(tagLine("todo", "现在没有待办清单") + "\n");
   const done = list.filter((t) => t.status === "completed").length;

@@ -10,7 +10,7 @@ import { runTurn, type Message } from "./agent.js";
 import { DATA_DIR } from "./config.js";
 import { NAME_PATTERN, parseFrontmatter } from "./frontmatter.js";
 import { TOOLS, toolLabel, type Tool, type ToolContext } from "./tools.js";
-import { c, newline, printSubagentDone, printSubagentStep, tagLine, write } from "./ui.js";
+import * as activity from "./activity.js";
 
 export interface AgentDef {
   name: string;
@@ -148,7 +148,8 @@ ${agent.prompt}`;
 const MAX_REVISIONS = 2; // 审核不通过时最多退回修改几次，防止一直改不完
 
 // 子 Agent 在自己的 messages 上跑一轮 Agent 循环；steps 用来统计一共用了几次工具
-async function runAgentTurn(agent: AgentDef, messages: Message[], ctx: ToolContext, stats: { steps: number }) {
+// owner：显示时算在哪个子 Agent 头上（审核员替别人干活时，算在被审核的那个头上）
+async function runAgentTurn(agent: AgentDef, messages: Message[], ctx: ToolContext, stats: { steps: number }, owner = agent.name) {
   const subCtx: ToolContext = {
     ...ctx,
     model: agent.model ?? ctx.model,
@@ -160,21 +161,21 @@ async function runAgentTurn(agent: AgentDef, messages: Message[], ctx: ToolConte
     onText: () => {}, // 子 Agent 一边想一边说的话不显示，学生只看到它用了哪些工具
     onToolCall: (name: string, rawArgs: string) => {
       stats.steps++;
-      printSubagentStep(agent.name, name, rawArgs, toolLabel(name));
+      activity.subagentStep(agent.name, name, rawArgs, toolLabel(name), owner);
     },
+    onToolResult: (_name: string, result: unknown) => activity.toolResult(result, 8),
   };
   return runTurn(messages, subCtx, events, toolsFor(agent));
 }
 
 // 反思：请审核员检查子 Agent 交出的结果。审核员第一行写「结论：通过」或「结论：不通过」
 async function review(reviewer: AgentDef, agent: AgentDef, task: string, result: string, ctx: ToolContext, stats: { steps: number }) {
-  newline();
-  write(tagLine("agent", `${reviewer.name} 审核 ${agent.name} 的结果`, 5) + "\n");
+  activity.note("agent", `${reviewer.name} 审核 ${agent.name} 的结果`, 5);
   const messages: Message[] = [
     { role: "system", content: subagentPrompt(reviewer, ctx.cwd) },
     { role: "user", content: `交给 ${agent.name} 的原任务：\n${task}\n\n${agent.name} 交出的结果：\n${result}\n\n请检查这份结果。` },
   ];
-  const text = (await runAgentTurn(reviewer, messages, ctx, stats)) ?? "";
+  const text = (await runAgentTurn(reviewer, messages, ctx, stats, agent.name)) ?? "";
   const passed = !/结论[:：]\s*不通过/.test(text); // 没按格式写结论的，当作通过，避免卡住
   const reason = text.replace(/^.*结论[:：].*\n?/, "").trim().split("\n")[0] ?? "";
   return { passed, text: text.trim(), reason };
@@ -201,23 +202,26 @@ async function runSubagent(args: { agent: string; description?: string; prompt: 
     while (result !== undefined && reviewer) {
       verdict = await review(reviewer, agent, args.prompt, result, ctx, stats);
       if (verdict.passed) {
-        write(tagLine("agent", `${reviewer.name}：通过`, 5) + "\n");
+        activity.note("agent", `${reviewer.name}：通过`, 5);
         break;
       }
       if (revisions >= MAX_REVISIONS) {
-        write(c.yellow(`     ⎿ [agent]${reviewer.name}：改了 ${revisions} 次还有问题，交给导师判断`) + "\n");
+        activity.note("agent", `${reviewer.name}：改了 ${revisions} 次还有问题，交给导师判断`, 5, verdict.text);
         break;
       }
       revisions++;
-      write(tagLine("agent", `${reviewer.name}：不通过，退回修改（第 ${revisions} 次）${verdict.reason ? ` · ${verdict.reason.slice(0, 60)}` : ""}`, 5) + "\n");
+      activity.note("agent", `${reviewer.name}：不通过，退回修改（第 ${revisions} 次）`, 5, verdict.text);
+      activity.revised(agent.name);
       messages.push({ role: "user", content: `审核意见（来自 ${reviewer.name}）：\n${verdict.text}\n\n请根据审核意见修改，重新给出完整的结果。` });
       result = await runAgentTurn(agent, messages, ctx, stats);
     }
   } catch (e) {
-    if (!ctx.signal.aborted) printSubagentDone(agent.name, stats.steps, Date.now() - started, false);
+    if (!ctx.signal.aborted) activity.warn(`  ⎿ [agent]${agent.name} 出错了，没有完成（用了 ${stats.steps} 次工具）`);
     throw e; // runTool 会把错误交给导师
   }
-  printSubagentDone(agent.name, stats.steps, Date.now() - started, result !== undefined);
+  const seconds = Math.max(1, Math.round((Date.now() - started) / 1000));
+  if (result === undefined) activity.warn(`  ⎿ [agent]${agent.name} 步骤太多，没有完成（用了 ${stats.steps} 次工具，${seconds} 秒）`);
+  else activity.note("agent", `${agent.name} 完成（用了 ${stats.steps} 次工具，${seconds} 秒）`, 5);
   if (result === undefined) return { error: `子 Agent ${agent.name} 步骤太多，没能完成。可以把任务拆小一点再派` };
   return {
     agent: agent.name,

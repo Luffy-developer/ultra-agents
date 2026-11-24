@@ -18,7 +18,8 @@ import { loadSkills, skillDirs, skillMessage, skillTool } from "./skills.js";
 import { agentDirs, loadAgents, taskTool, toolsFor } from "./subagents.js";
 import { clearTodos, printTodos, restoreTodos } from "./todo.js";
 import { listLessons, registerTools, toolLabel, type ToolContext, unregisterTools } from "./tools.js";
-import { c, endThinking, newline, printConfirm, printThinking, printToolCall, setMuted, tagLine, textWidth, write } from "./ui.js";
+import * as activity from "./activity.js";
+import { c, newline, printConfirm, setMuted, tagLine, textWidth, write } from "./ui.js";
 import { costOf, formatTokens, UsageMeter, usageLine } from "./usage.js";
 import { webSearch } from "./web.js";
 
@@ -376,7 +377,11 @@ async function main() {
 
   // escapeCodeTimeout：单独按 Esc 时，终端要等一会儿才能确定不是方向键等组合键的开头，默认等 500 毫秒，太慢了
   const rl = createInterface({ input: stdin, output: stdout, escapeCodeTimeout: 50 });
-  const completion = attachCompletion(rl, suggestCommands);
+  const completion = attachCompletion(rl, suggestCommands, () => {
+    process.stdout.write("\r\x1b[2K");
+    activity.printDetails();
+    rl.prompt(true);
+  });
   let closed = false;
   rl.on("close", async () => {
     closed = true;
@@ -555,6 +560,11 @@ async function main() {
       } else if (cmd === "model") await switchModel(arg);
       else if (cmd === "skills") showSkills(cwd, arg);
       else if (cmd === "hooks") showHooks();
+      else if (cmd === "details") activity.printDetails();
+      else if (cmd === "verbose") {
+        activity.setExpanded(!activity.isExpanded());
+        write(c.dim(activity.isExpanded() ? "已切换为完整显示：思考过程和每次工具调用都直接显示出来。再输入 /verbose 切换回折叠显示。\n" : "已切换为折叠显示：过程只显示一行总结，按 Ctrl+O 展开。\n"));
+      }
       else if (cmd === "agents") showAgents(cwd, arg);
       else if (cmd === "cost") showCost(meter, config);
       else if (cmd === "todos") printTodos();
@@ -601,8 +611,10 @@ async function main() {
         continue;
       }
     }
+    activity.startTurn(); // 开始记录这一轮的过程（Ctrl+O 展开时看的就是它）
     // UserPromptSubmit hooks：可以拦下这条消息，或者给导师补充信息（比如当前时间、git 状态）
     const hook = await runHooks("UserPromptSubmit", { prompt: input }, { cwd, signal: controller.signal });
+    activity.end();
     if (hook.blocked) {
       write(c.yellow("这条消息没有发给导师。") + "\n");
       controller = null;
@@ -625,37 +637,39 @@ async function main() {
     const prefix = "导师 › ";
     write("\n" + c.bold(c.cyan(prefix)));
     const md = new MarkdownStream(write, textWidth(prefix));
+    // 思考过程和工具调用折叠成一行灰色总结（activity.ts），导师开始说话时把总结行定下来
     const events = {
       onThinking: (delta: string) => {
-        md.flush(); // 思考过程另起一行，用灰色显示
-        printThinking(delta);
+        md.flush();
+        activity.thinking(delta);
       },
       onText: (delta: string) => {
-        endThinking();
+        activity.end();
         md.push(delta);
       },
       onToolCall: (name: string, args: string) => {
-        endThinking();
-        md.flush(); // 先把已经说的话显示完，再显示工具调用提示
-        printToolCall(name, args, toolLabel(name));
+        md.flush(); // 先把已经说的话显示完，再显示工具调用
+        activity.toolCall(name, args, toolLabel(name));
       },
+      onToolResult: (_name: string, result: unknown) => activity.toolResult(result),
     };
     try {
       const reply = await runTurn(messages, ctx, events);
-      endThinking();
+      activity.end();
       md.flush();
       newline();
       saveSession(sessionId, cwd, messages); // 每说完一轮就存档
       await runHooks("Stop", { reply: reply ?? "" }, { cwd });
     } catch (e) {
       messages.length = before; // 回滚这一轮，保证对话历史完整
-      endThinking();
+      activity.end();
       md.flush();
       newline();
       if (controller.signal.aborted) write(c.yellow("（已打断，可以重新说）\n"));
       else write(c.red(`出错了：${explainError(e)}`) + "\n");
     } finally {
       controller = null;
+      activity.end();
       // 这一轮用了多少 token（被打断的也算，钱已经花了）
       if (turnMeter.byModel.size) {
         const u = turnMeter.total();

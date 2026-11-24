@@ -1,5 +1,5 @@
 // 输入框里的命令补全：像 Claude Code 一样，输入 / 就在下面列出命令和说明，边打字边筛选
-//   ↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 关闭
+//   ↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 关闭；另外 Ctrl+O 展开上一轮的完整过程
 // 原理：拦截 readline 处理按键的函数，每次按键后根据当前输入算出候选项，画在输入行下面
 import type { Interface } from "node:readline/promises";
 import { c, termColumns, textWidth, truncateWidth } from "./ui.js";
@@ -22,7 +22,8 @@ function findTtyWrite(rl: Interface) {
   return undefined;
 }
 
-export function attachCompletion(rl: Interface, suggest: (line: string) => Suggestion[]) {
+// onExpand：在输入框里按 Ctrl+O 时调用（展开上一轮的完整过程）
+export function attachCompletion(rl: Interface, suggest: (line: string) => Suggestion[], onExpand?: () => void) {
   const out = process.stdout;
   const symbol = findTtyWrite(rl);
   const noop = { enable() {}, disable() {} };
@@ -118,6 +119,11 @@ export function attachCompletion(rl: Interface, suggest: (line: string) => Sugge
       items = [];
       hide();
       return original(s, key);
+    }
+    if (key.ctrl && key.name === "o") {
+      items = [];
+      hide();
+      return onExpand?.();
     }
     if (key.ctrl && (key.name === "c" || key.name === "d")) {
       items = [];

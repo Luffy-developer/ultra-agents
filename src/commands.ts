@@ -53,6 +53,8 @@ export const COMMANDS: Command[] = [
   { name: "compact", description: "把当前对话压缩成摘要（对话很长、回答变慢时用）" },
   { name: "todos", description: "查看导师正在做的待办清单" },
   { name: "cost", description: "查看本次启动以来用了多少 token、花了多少钱" },
+  { name: "details", description: "展开上一轮的完整过程：思考全文、每次工具调用和结果（也可以按 Ctrl+O）" },
+  { name: "verbose", description: "切换显示方式：过程折叠成一行总结 / 每一步都完整显示" },
   {
     name: "model",
     description: "查看可用的模型，或切换到另一个模型（会保存为默认）",
@@ -104,7 +106,7 @@ export function helpText() {
     "命令（输入 / 会弹出命令菜单，↑↓ 选择、Tab 补全）：",
     ...lines,
     "  /技能名 [要求]       直接使用某个技能（输入 /skills 查看有哪些）",
-    "正在回答时按 Ctrl+C 可以打断。",
+    "正在回答时按 Ctrl+C 可以打断；在输入框里按 Ctrl+O 展开上一轮的完整过程。",
     "启动参数：",
     "  agent-tutor --continue        接着这个目录里上次的对话",
     '  agent-tutor -p "问题"          不进入对话，回答完就退出（适合写脚本）',
