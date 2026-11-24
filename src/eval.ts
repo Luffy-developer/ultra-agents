@@ -11,7 +11,7 @@ import { runTurn, systemPrompt, type Message } from "./agent.js";
 import { type Config, DATA_DIR, searchConfig } from "./config.js";
 import { useInMemoryProgress } from "./memory.js";
 import { clearTodos } from "./todo.js";
-import type { ToolContext } from "./tools.js";
+import { toolLabel, type ToolContext } from "./tools.js";
 import { c, printToolCall, setMuted } from "./ui.js";
 import { readUsage, UsageMeter, usageLine } from "./usage.js";
 
@@ -144,7 +144,7 @@ async function runCase(item: EvalCase, client: OpenAI, config: Config, judgeMode
           tools.push(`task:${JSON.parse(rawArgs).agent}`);
         } catch {}
       }
-      if (verbose) printToolCall(name, rawArgs);
+      if (verbose) printToolCall(name, rawArgs, toolLabel(name));
     },
   };
   const messages: Message[] = [{ role: "system", content: systemPrompt(dir, item.tutor ?? "") }];

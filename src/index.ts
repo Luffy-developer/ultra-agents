@@ -15,8 +15,8 @@ import { runEval } from "./eval.js";
 import { cleanupSessions, latestSession, loadSession, newSessionId, saveSession } from "./session.js";
 import { agentDirs, loadAgents, taskTool, toolsFor } from "./subagents.js";
 import { clearTodos, printTodos, restoreTodos } from "./todo.js";
-import { listLessons, registerTools, type ToolContext } from "./tools.js";
-import { c, newline, printConfirm, printToolCall, setMuted, textWidth, write } from "./ui.js";
+import { listLessons, registerTools, toolLabel, type ToolContext } from "./tools.js";
+import { c, endThinking, newline, printConfirm, printThinking, printToolCall, setMuted, tagLine, textWidth, write } from "./ui.js";
 import { costOf, formatTokens, UsageMeter, usageLine } from "./usage.js";
 import { webSearch } from "./web.js";
 
@@ -447,19 +447,29 @@ async function main() {
     write("\n" + c.bold(c.cyan(prefix)));
     const md = new MarkdownStream(write, textWidth(prefix));
     const events = {
-      onText: (delta: string) => md.push(delta),
+      onThinking: (delta: string) => {
+        md.flush(); // 思考过程另起一行，用灰色显示
+        printThinking(delta);
+      },
+      onText: (delta: string) => {
+        endThinking();
+        md.push(delta);
+      },
       onToolCall: (name: string, args: string) => {
+        endThinking();
         md.flush(); // 先把已经说的话显示完，再显示工具调用提示
-        printToolCall(name, args);
+        printToolCall(name, args, toolLabel(name));
       },
     };
     try {
       await runTurn(messages, ctx, events);
+      endThinking();
       md.flush();
       newline();
       saveSession(sessionId, cwd, messages); // 每说完一轮就存档
     } catch (e) {
       messages.length = before; // 回滚这一轮，保证对话历史完整
+      endThinking();
       md.flush();
       newline();
       if (controller.signal.aborted) write(c.yellow("（已打断，可以重新说）\n"));
@@ -470,7 +480,7 @@ async function main() {
       if (turnMeter.byModel.size) {
         const u = turnMeter.total();
         const calls = u.calls > 1 ? `调用模型 ${u.calls} 次 · ` : "";
-        write(c.dim(`  ↳ ${calls}${usageLine(u, turnMeter.cost(config.prices), config.currency)}`) + "\n");
+        write(tagLine("usage", `${calls}${usageLine(u, turnMeter.cost(config.prices), config.currency)}`) + "\n");
       }
     }
   }

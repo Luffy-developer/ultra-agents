@@ -3,7 +3,7 @@
 // 清单属于当前这段对话：/clear 时清空，恢复旧对话时从对话记录里还原
 import type { Message } from "./agent.js";
 import type { Tool } from "./tools.js";
-import { c, newline, write } from "./ui.js";
+import { c, newline, tagLine, write } from "./ui.js";
 
 export interface Todo {
   content: string;
@@ -23,9 +23,9 @@ export function clearTodos() {
 
 export function printTodos(list = todos) {
   newline();
-  if (list.length === 0) return write(c.dim("  📋 现在没有待办清单\n"));
+  if (list.length === 0) return write(tagLine("todo", "现在没有待办清单") + "\n");
   const done = list.filter((t) => t.status === "completed").length;
-  write(c.dim(`  📋 待办清单（${done}/${list.length}）\n`));
+  write(tagLine("todo", `待办清单（${done}/${list.length}）`) + "\n");
   for (const t of list) {
     if (t.status === "completed") write(c.dim(`     ${c.green("☑")} ${c.strike(t.content)}\n`));
     else if (t.status === "in_progress") write(`     ${c.cyan("◐")} ${c.bold(t.content)}\n`);
@@ -55,6 +55,7 @@ function writeTodos(args: { todos?: unknown }) {
 
 export const TODO_TOOL: Tool = {
   name: "todo_write",
+  label: "更新待办清单",
   description:
     "维护当前任务的待办清单，会显示给学生看。要做 3 步以上的任务时，先列出所有步骤再动手；" +
     "开始做某一步时把它标成 in_progress，做完马上标成 completed，中途发现新步骤就加进去。" +

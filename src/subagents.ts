@@ -7,7 +7,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { runTurn, type Message } from "./agent.js";
 import { DATA_DIR } from "./config.js";
-import { TOOLS, type Tool, type ToolContext } from "./tools.js";
+import { TOOLS, toolLabel, type Tool, type ToolContext } from "./tools.js";
 import { printSubagentDone, printSubagentStep } from "./ui.js";
 
 export interface AgentDef {
@@ -145,7 +145,7 @@ async function runSubagent(args: { agent: string; description?: string; prompt: 
     onText: () => {}, // 子 Agent 一边想一边说的话不显示，学生只看到它用了哪些工具
     onToolCall: (name: string, rawArgs: string) => {
       steps++;
-      printSubagentStep(agent.name, name, rawArgs);
+      printSubagentStep(agent.name, name, rawArgs, toolLabel(name));
     },
   };
   let result: string | undefined;
@@ -164,6 +164,7 @@ async function runSubagent(args: { agent: string; description?: string; prompt: 
 export function taskTool(cwd: string): Tool {
   return {
     name: "task",
+    label: "派出子 Agent",
     concurrent: true,
     get description() {
       const list = loadAgents(cwd).agents.map((a) => `- ${a.name}：${a.description}`).join("\n");

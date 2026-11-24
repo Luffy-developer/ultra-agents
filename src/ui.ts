@@ -82,37 +82,72 @@ function toolSummary(rawArgs: string) {
   let summary = rawArgs;
   try {
     const args = JSON.parse(rawArgs || "{}");
-    summary = args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? args.pattern ?? (Object.keys(args).length ? JSON.stringify(args) : "");
+    const memory = args.id || args.content ? [args.id, args.content].filter(Boolean).join(" ") : undefined;
+    summary =
+      args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? args.pattern ?? args.completed_topic ?? args.level ?? memory ??
+      (Object.keys(args).length ? JSON.stringify(args) : "");
   } catch {}
   return summary.length > 80 ? summary.slice(0, 80) + "…" : summary;
 }
 
-export function printToolCall(name: string, rawArgs: string) {
-  if (name === "todo_write") return; // 待办清单工具自己会把清单画出来
-  newline();
+// 过程提示统一的样子：⎿ [标签]内容
+// 标签：[tools] 内置工具、[mcp] MCP 工具、[agent] 子 Agent、[todo] 待办清单、[think] 思考过程、[usage] 用量
+export function tagLine(tag: string, text: string, indent = 2) {
+  return `${" ".repeat(indent)}${c.dim("⎿ ")}${c.cyan(`[${tag}]`)}${c.dim(text)}`;
+}
+
+// 一次工具调用显示成什么：[tools]update_memory 更新记忆 · m3 怕看长代码
+function describeCall(name: string, rawArgs: string, label?: string) {
+  const summary = toolSummary(rawArgs);
   if (name === "task") {
     let args: any = {};
     try {
       args = JSON.parse(rawArgs || "{}");
     } catch {}
-    write(c.dim("  🤖 派出子 Agent ") + c.cyan(String(args.agent ?? "?")) + c.dim(args.description ? `：${args.description}` : "") + "\n");
-    return;
+    return { tag: "agent", text: `${args.agent ?? "?"} 派出子 Agent${args.description ? ` · ${args.description}` : ""}` };
   }
-  const summary = toolSummary(rawArgs);
-  write(c.dim(`  🔧 ${name}${summary ? ` ${summary}` : ""}`) + "\n");
+  const mcp = name.match(/^mcp__(.+?)__(.+)$/);
+  if (mcp) return { tag: "mcp", text: `${mcp[1]}/${mcp[2]}${summary ? ` · ${summary}` : ""}` };
+  return { tag: "tools", text: `${name}${label ? ` ${label}` : ""}${summary ? ` · ${summary}` : ""}` };
 }
 
-// 子 Agent 在用什么工具（几个子 Agent 同时干活时，靠前面的名字区分）
-export function printSubagentStep(agent: string, name: string, rawArgs: string) {
-  const summary = toolSummary(rawArgs);
+export function printToolCall(name: string, rawArgs: string, label?: string) {
+  if (name === "todo_write") return; // 待办清单工具自己会把清单画出来
+  const { tag, text } = describeCall(name, rawArgs, label);
   newline();
-  write(c.dim(`     ⎿ ${agent} · ${name}${summary ? ` ${summary}` : ""}`) + "\n");
+  write(tagLine(tag, text) + "\n");
+}
+
+// 子 Agent 在用什么工具（缩进一层；几个子 Agent 同时干活时，靠名字区分）
+export function printSubagentStep(agent: string, name: string, rawArgs: string, label?: string) {
+  const { tag, text } = describeCall(name, rawArgs, label);
+  newline();
+  write(tagLine(tag, `${agent} › ${text}`, 5) + "\n");
 }
 
 export function printSubagentDone(agent: string, steps: number, ms: number, ok: boolean) {
   const stats = `用了 ${steps} 次工具，${Math.max(1, Math.round(ms / 1000))} 秒`;
   newline();
-  write((ok ? c.dim(`     ⎿ ${agent} 完成（${stats}）`) : c.yellow(`     ⎿ ${agent} 没有完成（${stats}）`)) + "\n");
+  write((ok ? tagLine("agent", `${agent} 完成（${stats}）`, 5) : c.yellow(`     ⎿ [agent]${agent} 没有完成（${stats}）`)) + "\n");
+}
+
+// 思考过程（推理模型会先"想"一段再回答，比如 DeepSeek-R1）：灰色显示，和正式回答区分开
+let thinking = false;
+
+export function printThinking(delta: string) {
+  if (!thinking) {
+    newline();
+    write(tagLine("think", "思考过程") + "\n     ");
+    thinking = true;
+  }
+  write(c.dim(delta.replace(/\n+/g, "\n     ")));
+}
+
+// 思考结束（开始正式回答或调用工具了）
+export function endThinking() {
+  if (!thinking) return;
+  thinking = false;
+  write("\n");
 }
 
 export function printConfirm(title: string, detail: string) {

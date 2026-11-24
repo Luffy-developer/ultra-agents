@@ -61,6 +61,7 @@ ${instructions}`
 
 export interface AgentEvents {
   onText(delta: string): void; // 模型一边生成一边显示（流式输出）
+  onThinking?(delta: string): void; // 推理模型的思考过程
   onToolCall(name: string, args: string): void;
 }
 
@@ -98,6 +99,9 @@ export async function runTurn(messages: Message[], ctx: ToolContext, events: Age
       if (chunk.usage) usage = chunk.usage; // 用量在最后一个碎片里（有的服务每个碎片都带，取最后一次）
       const delta = chunk.choices[0]?.delta;
       if (!delta) continue;
+      // 推理模型的思考过程：DeepSeek 等放在 reasoning_content，有的服务叫 reasoning。只显示，不放进对话历史
+      const thought = (delta as any).reasoning_content ?? (delta as any).reasoning;
+      if (typeof thought === "string" && thought) events.onThinking?.(thought);
       if (delta.content) {
         content += delta.content;
         events.onText(delta.content);

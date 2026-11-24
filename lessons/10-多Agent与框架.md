@@ -20,7 +20,7 @@
 - 子 Agent 自己跑一遍完整的 Agent 循环（就是第 5 课的 `runTurn`），做完**只把结论交回给导师**，
   中间搜到的十几个网页不会塞进导师的对话里——这是拆分子 Agent 最大的好处：**隔离上下文**
 - 导师在同一步里派出好几个子 Agent，它们会**同时开工**，比一个一个来快
-- 终端里出现「🤖 派出子 Agent」，下面缩进的 ⎿ 行就是子 Agent 在用的工具
+- 终端里出现「⎿ [agent]… 派出子 Agent」，下面缩进一层的 ⎿ 行就是子 Agent 在用的工具
 
 内置了三个子 Agent：出题官 `quiz-maker`、调研员 `researcher`、通用助手 `general-purpose`。
 输入 `/agents` 查看；你还可以在 `~/.agent-tutor/agents/` 里写一个 Markdown 文件，定义自己的子 Agent：

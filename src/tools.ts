@@ -24,6 +24,7 @@ export interface ToolContext {
 
 export interface Tool {
   name: string;
+  label?: string; // 中文名，显示给学生看，如"更新记忆"
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
   run(args: any, ctx: ToolContext): unknown | Promise<unknown>;
@@ -226,12 +227,14 @@ const str = (description: string) => ({ type: "string", description });
 export const TOOLS: Tool[] = [
   {
     name: "get_progress",
+    label: "读取学习进度",
     description: "读取学生的水平、已学完的课程，以及你之前记下的关于这个学生的记忆（每条有 id）",
     parameters: { type: "object", properties: {} },
     run: progressForModel,
   },
   {
     name: "save_progress",
+    label: "保存学习进度",
     description: "更新学生的水平，或记录刚学完的课程",
     parameters: {
       type: "object",
@@ -244,12 +247,14 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "remember",
+    label: "记下记忆",
     description: "记下一条关于学生的新记忆（薄弱点、喜好、学习习惯等），以后上课都能用上。先看看有没有相近的旧记忆，有的话用 update_memory 改写，不要重复记",
     parameters: { type: "object", properties: { content: str("一句话写清楚，如：怕看长代码，代码要逐行讲") }, required: ["content"] },
     run: remember,
   },
   {
     name: "update_memory",
+    label: "更新记忆",
     description: "改写一条已有的记忆：情况变了（比如学生已经不怕代码了），或者要把几条相近的记忆合并成一条",
     parameters: {
       type: "object",
@@ -260,18 +265,21 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "forget",
+    label: "删除记忆",
     description: "删掉一条已经过时、错误，或者已经合并进别的记忆里的记忆",
     parameters: { type: "object", properties: { id: str("记忆的 id，如 m3") }, required: ["id"] },
     run: forget,
   },
   {
     name: "list_lessons",
+    label: "查看课程列表",
     description: "列出所有课程文件（按学习顺序）",
     parameters: { type: "object", properties: {} },
     run: listLessons,
   },
   {
     name: "read_lesson",
+    label: "读取讲义",
     description: "读取某节课的讲义内容，讲课前必须先读",
     parameters: { type: "object", properties: { filename: str("课程文件名，如 01-大模型是什么.md") }, required: ["filename"] },
     run: (args) => readLesson(args.filename),
@@ -279,12 +287,14 @@ export const TOOLS: Tool[] = [
   TODO_TOOL,
   {
     name: "list_files",
+    label: "查看文件列表",
     description: "列出学生练习目录（或其子目录）里的文件",
     parameters: { type: "object", properties: { path: str("相对路径，默认为练习目录本身") } },
     run: listFiles,
   },
   {
     name: "read_file",
+    label: "读取文件",
     description: "读取学生练习目录里的文件内容。文件很长时可以用 offset、limit 分段读",
     parameters: {
       type: "object",
@@ -299,6 +309,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "write_file",
+    label: "写入文件",
     description: "在学生练习目录里新建文件，或把整个文件重写（会先征求学生同意）。只改文件里的一部分时用 edit_file",
     parameters: {
       type: "object",
@@ -309,6 +320,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "edit_file",
+    label: "修改文件",
     description:
       "精确修改已有文件：把文件里的 old_string 换成 new_string，文件其余部分不动（会先征求学生同意）。" +
       "改之前先用 read_file 看文件内容；old_string 要和文件里一模一样（包括空格和缩进），并且只出现一次，不唯一时多带几行上下文",
@@ -326,12 +338,14 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "glob",
+    label: "查找文件",
     description: "按文件名查找练习目录里的文件，如 *.js（所有子目录里的 js 文件）、src/**/*.ts、*.{js,ts}",
     parameters: { type: "object", properties: { pattern: str("文件名通配符"), path: str("在哪个子目录里找，默认整个练习目录") }, required: ["pattern"] },
     run: globFiles,
   },
   {
     name: "grep",
+    label: "搜索代码",
     description: "按内容搜索练习目录里的文件（支持正则表达式），返回「文件:行号: 这一行」。找某个函数、变量、报错信息在哪时用",
     parameters: {
       type: "object",
@@ -347,12 +361,14 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "run_command",
+    label: "运行命令",
     description: "在学生练习目录里运行一条终端命令（会先征求学生同意），返回输出。不要运行需要交互输入的命令",
     parameters: { type: "object", properties: { command: str("要运行的命令") }, required: ["command"] },
     run: runCommand,
   },
   {
     name: "web_search",
+    label: "上网搜索",
     description: "上网搜索，返回网页标题、网址和摘要。用于讲义以外的新知识、最新资讯，或学生明确要求查资料时",
     parameters: {
       type: "object",
@@ -366,6 +382,7 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "web_fetch",
+    label: "读取网页",
     description: "读取某个网页的正文内容（自动去掉导航栏、广告等）。一般先用 web_search 找到网址再读",
     parameters: { type: "object", properties: { url: str("完整网址，以 http:// 或 https:// 开头") }, required: ["url"] },
     run: webFetch,
@@ -375,6 +392,10 @@ export const TOOLS: Tool[] = [
 // 启动后再加进来的工具（派子 Agent 的 task 工具、MCP 服务器提供的工具）
 export function registerTools(tools: Tool[]) {
   TOOLS.push(...tools);
+}
+
+export function toolLabel(name: string) {
+  return TOOLS.find((t) => t.name === name)?.label;
 }
 
 // 转成 OpenAI 接口需要的格式。每次调用模型时现算，这样新加的工具也能被模型看到

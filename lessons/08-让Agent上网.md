@@ -18,7 +18,7 @@
 
 ## 看看本项目
 - 打开 agent-tutor 源码里的 `src/web.ts`：`webSearch` 调用搜索 API，`webFetch` 读网页正文。
-- 终端里出现「🔧 web_search」「🔧 web_fetch」，就是导师在上网。
+- 终端里出现「⎿ [tools]web_search 上网搜索」「⎿ [tools]web_fetch 读取网页」，就是导师在上网。
 - 搜索需要在 `/setup` 里配置搜索服务和 key；读网页不需要 key。
 
 ## ⚠️ 安全：提示词注入
