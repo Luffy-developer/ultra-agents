@@ -2,13 +2,20 @@
 // - 思考时：显示一个灰底的临时面板，滚动显示最新的几行思考内容；想完了面板消失，只留一行"思考了 9 秒"
 // - 工具调用：只显示一行灰色的总结，比如
 //   ⎿ 读了 hello.js、api.js · 搜索「MCP 是什么」· 运行了 node hello.js（ctrl+o 展开）
-// 回到输入框时按 Ctrl+O（或输入 /details），才展开看上一轮的完整过程；输入 /verbose 可以改成一直完整显示
+// 回到输入框时按 Ctrl+O（或输入 /details），才展开看上一轮的完整过程；/details 序号 可以看任意一轮；输入 /verbose 可以改成一直完整显示
 // 需要学生看到的内容（"允许吗？"确认、待办清单、hook 拦截警告）不折叠
 import { c, charWidth, describeCall, newline, tagLine, termColumns, textWidth, toolSummary, truncateWidth, write, writeSeq } from "./ui.js";
 
-// 这一轮的完整过程（展开时显示）
+// 每一轮的完整过程（展开时显示）
 type LogItem = { kind: "think"; text: string; started: number; ms: number } | { kind: "line"; text: string };
-let log: LogItem[] = [];
+interface Turn {
+  input: string; // 学生这一轮说了什么（在 /details 菜单里用来认出是哪一轮）
+  log: LogItem[];
+  briefs: string[]; // 这一轮显示过的总结行，如"思考了 4 秒"、"读了 hello.js"
+}
+const MAX_TURNS = 100;
+let turns: Turn[] = [];
+let log: LogItem[] = []; // 当前这一轮的记录（就是 turns 最后一项的 log）
 
 // 正在折叠显示的这一段过程：导师说话之前的那些思考和工具调用，合成一行总结
 interface Group {
@@ -32,10 +39,51 @@ export function isExpanded() {
   return expanded;
 }
 
-// 新的一轮开始：清空上一轮的过程记录
-export function startTurn() {
+// 新的一轮开始
+export function startTurn(input: string) {
   end();
   log = [];
+  turns.push({ input: oneLine(input), log, briefs: [] });
+  if (turns.length > MAX_TURNS) turns.shift();
+}
+
+const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+const brief = (text: string) => turns.at(-1)?.briefs.push(text);
+
+// 开始新对话（/clear）时清空
+export function clearTurns() {
+  end();
+  turns = [];
+  log = [];
+}
+
+// 恢复旧对话（/resume）时，从对话记录里还原每一轮的工具调用和结果（思考过程没有存档，还原不了）
+export function restoreTurns(messages: any[], label: (name: string) => string | undefined) {
+  clearTurns();
+  for (const m of messages) {
+    const content = typeof m.content === "string" ? m.content : "";
+    if (m.role === "user") {
+      if (content.startsWith("（系统提示")) continue; // 压缩对话留下的交接笔记，不算一轮
+      const skill = content.match(/^（学生输入了 (\/[^，,\s]+)/);
+      const request = content.split("学生的要求：")[1];
+      startTurn(skill ? `${skill[1]} ${request ?? ""}` : content.split("\n\n（以下是学生设置的 hook")[0]);
+    } else if (m.role === "assistant" && turns.length) {
+      for (const call of m.tool_calls ?? []) {
+        const name = call.function?.name ?? "";
+        const { tag, text } = describeCall(name, call.function?.arguments ?? "", label(name));
+        log.push({ kind: "line", text: tagLine(tag, text) });
+      }
+    } else if (m.role === "tool" && turns.length) toolResult(content);
+  }
+  for (const t of turns) {
+    const calls = t.log.filter((item) => item.kind === "line" && item.text.includes("⎿")).length;
+    if (calls) t.briefs.push(`调用了 ${calls} 次工具`);
+  }
+}
+
+// /details 菜单里列出的每一轮：序号、学生说的话、这一轮干了什么
+export function turnList() {
+  return turns.map((t, i) => ({ index: i + 1, input: t.input, brief: t.briefs.join(" · ") }));
 }
 
 // 工具名 → 总结里的说法；第二项表示要不要列出对象（文件名、搜索词……）
@@ -132,6 +180,7 @@ function endGroup() {
   group = null;
   const text = summary(g);
   if (!text) return;
+  brief(text);
   if (!live()) return write(`  ⎿ ${text}\n`); // 输出到文件时只写最终的总结
   if (interrupted(g)) return; // 已经定格在屏幕上了
   if (g.shown) write("\r\x1b[2K");
@@ -233,6 +282,7 @@ function drawPanel(item: { text: string }, force = false) {
 function closePanel(item: { ms: number }) {
   if (!panel) return;
   const seconds = Math.max(1, Math.round(item.ms / 1000));
+  brief(`思考了 ${seconds} 秒`);
   if (live()) {
     if (!erasePanel()) newline();
   } else newline();
@@ -309,11 +359,17 @@ export function warn(text: string) {
 }
 
 // Ctrl+O / /details：展开上一轮的完整过程
-export function printDetails() {
+// Ctrl+O / /details：展开某一轮的完整过程，不指定就是上一轮
+export function printDetails(arg = "") {
   end();
-  const items = log.filter((item) => item.kind === "think" || item.text);
-  if (items.length === 0) return write(c.dim("\n上一轮没有思考过程或工具调用。\n"));
-  write(c.dim("\n──────── 上一轮的完整过程 ────────\n"));
+  if (turns.length === 0) return write(c.dim("\n这段对话还没有过程记录。\n"));
+  const n = arg.trim() ? Number(arg) : turns.length;
+  const turn = turns[n - 1];
+  if (!Number.isInteger(n) || !turn) return write(c.red(`没有第 ${arg} 轮，这段对话一共 ${turns.length} 轮。输入 /details 加空格可以从菜单里选`) + "\n");
+  const which = n === turns.length ? "上一轮" : `第 ${n} 轮`;
+  const items = turn.log.filter((item) => item.kind === "think" || item.text);
+  if (items.length === 0) return write(c.dim(`\n${which}（「${truncateWidth(turn.input, 30)}」）没有思考过程或工具调用。\n`));
+  write(c.dim(`\n──────── ${which}的完整过程 · 你说：${truncateWidth(turn.input, 30)} ────────\n`));
   for (const item of items) {
     if (item.kind === "line") write(item.text + "\n");
     else {

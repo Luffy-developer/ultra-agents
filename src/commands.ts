@@ -1,5 +1,6 @@
 // 斜杠命令清单：名字、说明、可选参数都在这里定义
 // /help 的帮助文字、输入 / 时弹出的补全菜单，都从这份清单生成
+import * as activity from "./activity.js";
 import type { Suggestion } from "./input.js";
 import { mcpStatuses } from "./mcp.js";
 import { listSessions } from "./session.js";
@@ -53,7 +54,17 @@ export const COMMANDS: Command[] = [
   { name: "compact", description: "把当前对话压缩成摘要（对话很长、回答变慢时用）" },
   { name: "todos", description: "查看导师正在做的待办清单" },
   { name: "cost", description: "查看本次启动以来用了多少 token、花了多少钱" },
-  { name: "details", description: "展开上一轮的完整过程：思考全文、每次工具调用和结果（也可以按 Ctrl+O）" },
+  {
+    name: "details",
+    description: "展开某一轮的完整过程：思考全文、每次工具调用和结果（不写序号就是上一轮，也可以按 Ctrl+O）",
+    argHint: "[序号]",
+    // 最近的在前面
+    args: () =>
+      activity
+        .turnList()
+        .reverse()
+        .map((turn) => ({ value: `/details ${turn.index}`, label: String(turn.index), description: `${turn.input}${turn.brief ? `  · ${turn.brief}` : "  · 没有工具调用"}` })),
+  },
   { name: "verbose", description: "切换显示方式：过程折叠成一行总结 / 每一步都完整显示" },
   {
     name: "model",

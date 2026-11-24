@@ -419,6 +419,7 @@ async function main() {
     sessionId = session.id;
     alwaysAllowed.clear();
     restoreTodos(session.messages);
+    activity.restoreTurns(session.messages, toolLabel);
     const lastReply = [...session.messages].reverse().find((m) => m.role === "assistant" && typeof m.content === "string" && m.content);
     write(c.dim(`\n已恢复 ${formatTime(session.updated)} 的对话「${session.title}」\n`));
     if (lastReply) write(c.dim(`导师上次说到：${plainText(String(lastReply.content)).slice(-120)}\n`));
@@ -543,6 +544,7 @@ async function main() {
       throw e;
     }
     if (!input) continue;
+    const typed = input; // 学生实际输入的（用技能时 input 会被换成技能说明）
 
     let skillInput: string | undefined;
     if (input.startsWith("/")) {
@@ -560,7 +562,7 @@ async function main() {
       } else if (cmd === "model") await switchModel(arg);
       else if (cmd === "skills") showSkills(cwd, arg);
       else if (cmd === "hooks") showHooks();
-      else if (cmd === "details") activity.printDetails();
+      else if (cmd === "details") activity.printDetails(arg);
       else if (cmd === "verbose") {
         activity.setExpanded(!activity.isExpanded());
         write(c.dim(activity.isExpanded() ? "已切换为完整显示：思考过程和每次工具调用都直接显示出来。再输入 /verbose 切换回折叠显示。\n" : "已切换为折叠显示：过程只显示一行总结，按 Ctrl+O 展开。\n"));
@@ -584,6 +586,7 @@ async function main() {
         sessionId = newSessionId();
         alwaysAllowed.clear();
         clearTodos();
+        activity.clearTurns();
         write(c.dim("已开始新对话（之前的对话已保存，可以用 /resume 找回）。\n"));
       } else if (cmd === "setup") {
         config = await runSetup(rl);
@@ -611,7 +614,7 @@ async function main() {
         continue;
       }
     }
-    activity.startTurn(); // 开始记录这一轮的过程（Ctrl+O 展开时看的就是它）
+    activity.startTurn(typed); // 开始记录这一轮的过程（Ctrl+O、/details 展开时看的就是它）
     // UserPromptSubmit hooks：可以拦下这条消息，或者给导师补充信息（比如当前时间、git 状态）
     const hook = await runHooks("UserPromptSubmit", { prompt: input }, { cwd, signal: controller.signal });
     activity.end();
