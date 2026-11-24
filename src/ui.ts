@@ -84,7 +84,7 @@ function toolSummary(rawArgs: string) {
     const args = JSON.parse(rawArgs || "{}");
     const memory = args.id || args.content ? [args.id, args.content].filter(Boolean).join(" ") : undefined;
     summary =
-      args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? args.pattern ?? args.completed_topic ?? args.level ?? memory ??
+      args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? args.pattern ?? args.completed_topic ?? args.level ?? args.name ?? memory ??
       (Object.keys(args).length ? JSON.stringify(args) : "");
   } catch {}
   return summary.length > 80 ? summary.slice(0, 80) + "…" : summary;

@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "lessons",
-    "evals"
+    "evals",
+    "skills"
   ],
   "engines": {
     "node": ">=20"

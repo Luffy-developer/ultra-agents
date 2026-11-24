@@ -52,7 +52,11 @@ agent-tutor
 | `/todos` | 查看导师正在做的待办清单 |
 | `/cost` | 查看本次启动以来用了多少 token、花了多少钱 |
 | `/setup` | 修改模型和搜索服务配置 |
+| `/model [模型名]` | 列出模型服务里可用的模型；加模型名就切换过去（保存为默认） |
 | `/mcp [服务器名]` | 查看已连接的 MCP 服务器；加服务器名查看每个工具的说明 |
+| `/mcp add 名字 命令或网址` | 添加 MCP 服务器，马上连接；`/mcp remove 名字` 删除 |
+| `/skills [名字]` | 查看可用的技能；`/技能名 要求` 直接使用某个技能 |
+| `/hooks` | 查看设置好的 hooks 和写法 |
 | `/agents [名字]` | 查看导师可以派出的子 Agent；加名字查看人设和能用的工具 |
 | `/help` | 帮助 |
 | `/exit` 或 Ctrl+D | 退出 |
@@ -150,7 +154,9 @@ MCP 是给 Agent 用的"标准插头"：别人写好的 MCP 服务器（地图�
 ```
 
 - 本地服务器写 `command` + `args`（需要 key 的话写在 `env` 里），远程服务器写 `url`
-- 修改后重启 agent-tutor 生效；启动时第一屏会显示连接结果，输入 `/mcp` 查看详情
+- 也可以不改文件，直接在程序里输入 `/mcp add 名字 npx -y 包名` 或 `/mcp add 名字 https://网址`，马上连接、马上能用
+  （需要 key：`/mcp add 名字 -e KEY=值 npx -y 包名`；远程服务器加请求头：`-H "Authorization: Bearer xx"`；`-e`、`-H` 写在命令前面）
+- 直接改文件的话要重启 agent-tutor 才生效；启动时第一屏会显示连接结果，输入 `/mcp` 查看详情
 - 每次调用 MCP 工具前都会征求你的同意。本地 MCP 服务器是在你电脑上运行的程序，只安装可信来源的
 
 ### 子 Agent
@@ -159,7 +165,10 @@ MCP 是给 Agent 用的"标准插头"：别人写好的 MCP 服务器（地图�
 子 Agent 有自己的人设、只能用分配给它的工具、看不到你们的聊天记录，做完只把结果交回给导师；
 导师一次派出几个时，它们会同时开工。
 
-内置三个：`quiz-maker`（出题官）、`researcher`（调研员，需要配置网页搜索）、`general-purpose`（通用助手）。
+内置四个：`quiz-maker`（出题官）、`quiz-reviewer`（审题官）、`researcher`（调研员，需要配置网页搜索）、`general-purpose`（通用助手）。
+
+**反思**：子 Agent 可以指定一个审核员。交结果前先请审核员检查，不通过就带着意见退回修改，最多改 2 次。
+出题官就配了审题官：检查题目是不是讲义里讲过的、答案对不对、提示有没有泄露答案。
 自定义子 Agent：在 `~/.agent-tutor/agents/`（所有目录生效）或练习目录的 `.agent-tutor/agents/`（只对这个目录生效）
 新建一个 `.md` 文件，格式和 Claude Code 的 `.claude/agents/*.md` 一样，改完不用重启：
 
@@ -169,13 +178,61 @@ name: code-reviewer
 description: 代码检查员：检查学生写的代码有没有错误，用小白能懂的话指出问题
 tools: read_file, list_files
 model: 可选，不写就和导师用同一个模型
+reviewer: 可选，审核员的名字
 ---
 你是代码检查员。先用 list_files 找到要检查的文件，再用 read_file 读代码，逐个指出问题。
 ```
 
 - `tools` 不写就能用除了「改学生进度和记忆」以外的全部工具；`mcp__*` 表示所有 MCP 工具
 - 子 Agent 写文件、运行命令时同样会征求你的同意，并注明是哪个子 Agent 发起的
+- `reviewer: 审核员名字`：交结果前先请这个子 Agent 审核（审核员第一行要写「结论：通过」或「结论：不通过」）
 - 和内置子 Agent 同名的会覆盖内置的
+
+### 技能 Skills
+
+和 Claude Code 的 Skills 一样：把一套做事方法写成说明书，导师平时只看得到名字和一句话说明，用得上时才调用 `use_skill` 读全文（不占每一轮的上下文）。
+也可以直接输入 `/技能名 要求` 使用，比如 `/study-plan 每周学两次`。
+
+内置两个：`study-plan`（定学习计划）、`explain-code`（逐段给小白讲代码）。
+自己写：在 `~/.agent-tutor/skills/`（所有目录生效）或练习目录的 `.agent-tutor/skills/` 里新建一个文件夹，放一个 `SKILL.md`：
+
+```markdown
+---
+name: weekly-review
+description: 帮学生做每周学习复盘。学生说"复盘一下""这周学了什么"时使用
+---
+1. 用 get_progress 看这周学完了哪些课
+2. 每节课问学生一个问题，检查还记不记得
+```
+
+文件夹里还可以放模板、例子等附件，导师需要时会读。改完不用重启。
+
+### Hooks
+
+和 Claude Code 的 Hooks 一样：在特定时刻自动运行你写的命令，不经过模型。在 `~/.agent-tutor/hooks.json` 里设置：
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [{ "matcher": "write_file|edit_file", "command": "npx prettier --write \"$AGENT_TUTOR_FILE\"" }],
+    "PreToolUse": [{ "matcher": "run_command", "command": "grep -q 'rm -rf' && echo '不许删除文件' >&2 && exit 2 || exit 0" }],
+    "UserPromptSubmit": [{ "command": "date" }],
+    "Stop": [{ "command": "afplay /System/Library/Sounds/Glass.aiff" }]
+  }
+}
+```
+
+| 时刻 | 说明 |
+|---|---|
+| `PreToolUse` | 导师调用工具之前。命令以退出码 2 结束 = 拦下这次调用，错误输出会告诉导师原因 |
+| `PostToolUse` | 工具执行完之后。退出码 2 时，错误输出会作为反馈交给导师 |
+| `UserPromptSubmit` | 你发消息之后、导师回答之前。命令的输出会作为补充信息交给导师；退出码 2 = 这条消息不发 |
+| `Stop` | 导师回答完一轮 |
+
+- `matcher` 是匹配工具名的正则，不写就是所有工具；也兼容 Claude Code 嵌套的 `"hooks": [{ "type": "command", ... }]` 写法
+- 命令能拿到：环境变量 `AGENT_TUTOR_FILE`（工具参数里文件的完整路径）、`AGENT_TUTOR_TOOL`、`AGENT_TUTOR_EVENT`，标准输入里是完整信息（JSON）
+- 改完马上生效。为了安全，只读取 `~/.agent-tutor/hooks.json`，不读练习目录里的（免得打开别人的项目就自动执行别人写的命令）
+- 自动化评估时不会运行 hooks
 
 ## 开发
 
@@ -198,7 +255,11 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 | `src/usage.ts` | token 用量统计和花费计算 |
 | `src/eval.ts` | 自动化评估：跑测试题、规则检查、评委模型打分 |
 | `evals/cases.json` | 内置的测试题 |
-| `src/subagents.ts` | 子 Agent：内置和自定义子 Agent 的定义，以及派活用的 `task` 工具 |
+| `src/subagents.ts` | 子 Agent：内置和自定义子 Agent 的定义、派活用的 `task` 工具、审核员（反思） |
+| `src/skills.ts` | 技能：加载 SKILL.md，`use_skill` 工具 |
+| `src/hooks.ts` | Hooks：在工具调用前后、发消息后、回答完时运行你的命令 |
+| `src/frontmatter.ts` | 解析子 Agent、技能文件开头的 `---` 头部 |
+| `skills/` | 内置的技能 |
 | `src/web.ts` | 网页工具：`web_search` 调用搜索 API，`web_fetch` 读取网页正文 |
 | `src/mcp.ts` | MCP 客户端：连接 MCP 服务器，把它们的工具接进导师的工具列表 |
 | `src/config.ts` | 模型配置和首次运行向导 |
@@ -212,6 +273,8 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 - `config.json`：模型和搜索服务配置
 - `mcp.json`：MCP 服务器（可选）
 - `agents/`：自定义子 Agent（可选）
+- `skills/`：自定义技能（可选）
+- `hooks.json`：Hooks（可选）
 - `TUTOR.md`：你写给导师的说明（可选）
 - `progress.json`：学习进度和导师对你的记忆（删掉即可从头开始）
 - `sessions/`：对话存档，只保留最近 30 个
@@ -219,5 +282,4 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 
 ## 后续可以做的
 1. 课程多了以后，把 `read_lesson` 升级为向量检索（RAG，第 7 课）
-2. 出题官出完题，再派一个「审题官」子 Agent 检查答案（反思）
-3. 发布到 npm，让别人 `npm install -g agent-tutor` 就能用
+2. 发布到 npm，让别人 `npm install -g agent-tutor` 就能用

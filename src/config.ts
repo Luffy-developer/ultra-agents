@@ -48,6 +48,15 @@ export function isComplete(c: Partial<Config>): c is Config {
   return Boolean(c.baseURL && c.model);
 }
 
+// /model 切换模型后保存成默认模型，下次启动也用它
+export function saveModel(model: string) {
+  const file = readConfigFile();
+  file.model = model;
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(CONFIG_FILE, JSON.stringify(file, null, 2));
+  chmodSync(CONFIG_FILE, 0o600);
+}
+
 // 首次运行或 `agent-tutor --setup` 时的配置向导
 export async function runSetup(rl: Interface): Promise<Config> {
   const old = readConfigFile();

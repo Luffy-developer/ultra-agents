@@ -9,7 +9,8 @@
 //     "remote": { "url": "https://example.com/mcp" }                     ← 远程服务器：通过网络通信
 //   }
 // }
-import { existsSync, readFileSync } from "node:fs";
+// 也可以在程序里输入 /mcp add 名字 命令或网址 来添加（会写进这个文件并马上连接），/mcp remove 名字 删除
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -33,7 +34,7 @@ interface HttpServerConfig {
   disabled?: boolean;
 }
 
-type ServerConfig = StdioServerConfig | HttpServerConfig;
+export type ServerConfig = StdioServerConfig | HttpServerConfig;
 
 export interface McpServerStatus {
   name: string;
@@ -46,29 +47,47 @@ const CONNECT_TIMEOUT_MS = 60_000; // npx 第一次运行要下载，给足时�
 const CALL_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 8000;
 
-const clients: Client[] = [];
+const clients = new Map<string, Client>(); // 服务器名 → 连接
 let statuses: McpServerStatus[] = [];
 
 export function mcpStatuses() {
   return statuses;
 }
 
-function loadMcpConfig(): Record<string, ServerConfig> {
+function readConfigFile(): any {
   if (!existsSync(MCP_CONFIG_FILE)) return {};
-  let json: any;
   try {
-    json = JSON.parse(readFileSync(MCP_CONFIG_FILE, "utf-8"));
+    return JSON.parse(readFileSync(MCP_CONFIG_FILE, "utf-8"));
   } catch (e) {
     throw new Error(`${MCP_CONFIG_FILE} 不是合法的 JSON：${e instanceof Error ? e.message : e}`);
   }
-  return json.mcpServers ?? {};
+}
+
+function loadMcpConfig(): Record<string, ServerConfig> {
+  return readConfigFile().mcpServers ?? {};
+}
+
+// 改配置文件时保留文件里的其他内容；里面可能有 token，只让自己能读
+function writeMcpServers(update: (servers: Record<string, ServerConfig>) => void) {
+  const json = readConfigFile();
+  json.mcpServers ??= {};
+  update(json.mcpServers);
+  mkdirSync(DATA_DIR, { recursive: true });
+  writeFileSync(MCP_CONFIG_FILE, JSON.stringify(json, null, 2));
+  chmodSync(MCP_CONFIG_FILE, 0o600);
 }
 
 // OpenAI 接口要求工具名只能有字母、数字、下划线、横线，最长 64 个字符
 // 加上 mcp__服务器名__ 前缀，既避免和自带工具重名，也能看出工具来自哪个服务器
+const safe = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_");
+
 function toolName(server: string, tool: string) {
-  const safe = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return `mcp__${safe(server)}__${safe(tool)}`.slice(0, 64);
+  return `${mcpToolPrefix(server)}${safe(tool)}`.slice(0, 64);
+}
+
+// 某个服务器的所有工具名都以这个开头（删除服务器时用来找出它的工具）
+export function mcpToolPrefix(server: string) {
+  return `mcp__${safe(server)}__`;
 }
 
 // MCP 工具的参数说明（JSON Schema）基本可以直接给模型用，只去掉个别模型不认的字段
@@ -125,7 +144,7 @@ async function connectServer(name: string, cfg: ServerConfig, version: string) {
     const reason = e instanceof Error ? e.message : String(e);
     throw new Error(stderrTail.trim() ? `${reason}\n${stderrTail.trim()}` : reason);
   }
-  clients.push(client);
+  clients.set(name, client);
 
   // 工具很多时服务器会分页返回，用 nextCursor 一页一页取
   const mcpTools = [];
@@ -178,7 +197,38 @@ export async function connectMcpServers(version: string): Promise<{ statuses: Mc
   return { statuses, tools };
 }
 
+async function disconnect(name: string) {
+  await clients.get(name)?.close().catch(() => {});
+  clients.delete(name);
+  statuses = statuses.filter((s) => s.name !== name);
+}
+
+// /mcp add：写进配置文件，然后马上连接（不用重启）。连接失败也保留配置，方便改了再试
+export async function addMcpServer(name: string, cfg: ServerConfig, version: string) {
+  writeMcpServers((servers) => (servers[name] = cfg));
+  await disconnect(name); // 同名的旧服务器先断开
+  let status: McpServerStatus;
+  let tools: Tool[] = [];
+  try {
+    const server = await connectServer(name, cfg, version);
+    tools = server.tools;
+    status = { name, ok: true, tools: server.info };
+  } catch (e) {
+    status = { name, ok: false, tools: [], error: e instanceof Error ? e.message : String(e) };
+  }
+  statuses.push(status);
+  return { status, tools };
+}
+
+// /mcp remove：从配置文件里删掉，并断开连接。返回 false 表示本来就没有这个服务器
+export async function removeMcpServer(name: string) {
+  const existed = name in loadMcpConfig() || clients.has(name);
+  writeMcpServers((servers) => delete servers[name]);
+  await disconnect(name);
+  return existed;
+}
+
 // 退出时关闭所有 MCP 服务器，免得留下后台进程
 export async function closeMcpServers() {
-  await Promise.allSettled(clients.map((c) => c.close()));
+  await Promise.allSettled([...clients.values()].map((c) => c.close()));
 }

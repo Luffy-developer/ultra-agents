@@ -5,17 +5,19 @@ import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import OpenAI from "openai";
 import { compactHistory, needsCompaction, runTurn, systemPrompt, trimHistory, type Message } from "./agent.js";
-import { type Config, DATA_DIR, isComplete, loadConfig, runSetup, searchConfig } from "./config.js";
-import { formatTime, helpText, recentSessions, suggestCommands } from "./commands.js";
+import { type Config, DATA_DIR, isComplete, loadConfig, runSetup, saveModel, searchConfig } from "./config.js";
+import { formatTime, helpText, recentSessions, setModelChoices, splitArgs, suggestCommands } from "./commands.js";
+import { HOOK_EVENTS, HOOKS_FILE, loadHooks, runHooks, setHooksEnabled } from "./hooks.js";
 import { attachCompletion } from "./input.js";
 import { MarkdownStream, plainText } from "./markdown.js";
-import { closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses } from "./mcp.js";
+import { addMcpServer, closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses, mcpToolPrefix, removeMcpServer, type ServerConfig } from "./mcp.js";
 import { getProgress, instructionFiles } from "./memory.js";
 import { runEval } from "./eval.js";
 import { cleanupSessions, latestSession, loadSession, newSessionId, saveSession } from "./session.js";
+import { loadSkills, skillDirs, skillMessage, skillTool } from "./skills.js";
 import { agentDirs, loadAgents, taskTool, toolsFor } from "./subagents.js";
 import { clearTodos, printTodos, restoreTodos } from "./todo.js";
-import { listLessons, registerTools, toolLabel, type ToolContext } from "./tools.js";
+import { listLessons, registerTools, toolLabel, type ToolContext, unregisterTools } from "./tools.js";
 import { c, endThinking, newline, printConfirm, printThinking, printToolCall, setMuted, tagLine, textWidth, write } from "./ui.js";
 import { costOf, formatTokens, UsageMeter, usageLine } from "./usage.js";
 import { webSearch } from "./web.js";
@@ -100,9 +102,9 @@ function showMcp(name?: string) {
     for (const t of server.tools) write(`  ${c.cyan(t.name)}  ${c.dim(t.description || "（没有说明）")}\n`);
     return;
   }
-  write(c.dim(`\n配置文件：${MCP_CONFIG_FILE}（修改后重启 agent-tutor 生效）\n`));
+  write(c.dim(`\n配置文件：${MCP_CONFIG_FILE}（用 /mcp add、/mcp remove 修改马上生效；直接改文件要重启）\n`));
   if (statuses.length === 0) {
-    write(`还没有配置 MCP 服务器。在配置文件里按这个格式填写（和 Claude Code 的格式一样）：\n${c.dim(MCP_EXAMPLE)}\n`);
+    write(`还没有配置 MCP 服务器。最简单的办法：输入 /mcp add 查看用法。\n也可以直接在配置文件里按这个格式填写（和 Claude Code 的格式一样）：\n${c.dim(MCP_EXAMPLE)}\n`);
     return;
   }
   for (const s of statuses) {
@@ -127,6 +129,7 @@ function showAgents(cwd: string, name?: string) {
     if (!agent) return write(c.red(`没有叫 ${name} 的子 Agent，输入 /agents 查看全部`) + "\n");
     write(`\n${c.bold(agent.name)} ${c.dim(`· ${agent.source}`)}\n${agent.description}\n`);
     write(c.dim(`模型：${agent.model ?? "和导师一样"}\n`));
+    if (agent.reviewer) write(c.dim(`审核员：${agent.reviewer}（交结果前先请它检查，不通过就退回修改）\n`));
     write(c.dim(`工具：${toolsFor(agent).map((t) => t.name).join("、") || "无"}\n`));
     write(c.dim("人设：\n") + c.dim(agent.prompt.replace(/^/gm, "  │ ")) + "\n");
     return;
@@ -137,6 +140,126 @@ function showAgents(cwd: string, name?: string) {
   write(c.dim(`\n输入 /agents 名字 查看人设和能用的工具。想自定义子 Agent，在下面任一目录新建一个 .md 文件（改完不用重启）：\n`));
   for (const dir of agentDirs(cwd)) write(c.dim(`  ${dir}\n`));
   write(c.dim(`格式（和 Claude Code 的一样；tools 不写就能用除改记忆外的全部工具，mcp__* 表示所有 MCP 工具）：\n${AGENT_EXAMPLE}\n`));
+}
+
+const MCP_ADD_USAGE = `用法：
+  /mcp add 名字 命令 [参数...]   本地服务器，如：/mcp add everything npx -y @modelcontextprotocol/server-everything
+  /mcp add 名字 网址             远程服务器，如：/mcp add 远程 https://example.com/mcp
+  需要 key 时：/mcp add 名字 -e KEY=值 npx -y 包名
+  远程服务器加请求头：/mcp add 名字 -H "Authorization: Bearer 你的token" https://...
+  （-e、-H 要写在命令或网址的前面；名字相同会覆盖原来的）
+删除：/mcp remove 名字`;
+
+// /mcp add：写进 mcp.json，马上连接，工具立刻就能用
+async function mcpAdd(tokens: string[]) {
+  const [name, ...rest] = tokens;
+  if (!name || rest.length === 0) return write(MCP_ADD_USAGE + "\n");
+  if (!/^[\w一-龥-]+$/.test(name)) return write(c.red(`名字只能用字母、数字、中文、- 和 _：${name}`) + "\n");
+  const env: Record<string, string> = {};
+  const headers: Record<string, string> = {};
+  let i = 0;
+  for (; i < rest.length && rest[i].startsWith("-"); i += 2) {
+    const [flag, value = ""] = [rest[i], rest[i + 1]];
+    const sep = flag === "-H" || flag === "--header" ? value.indexOf(":") : value.indexOf("=");
+    if (sep <= 0 || !["-e", "--env", "-H", "--header"].includes(flag)) return write(c.red(`看不懂：${flag} ${value}`) + "\n" + MCP_ADD_USAGE + "\n");
+    const target = flag === "-e" || flag === "--env" ? env : headers;
+    target[value.slice(0, sep).trim()] = value.slice(sep + 1).trim();
+  }
+  const target = rest.slice(i);
+  if (target.length === 0) return write(MCP_ADD_USAGE + "\n");
+  const cfg: ServerConfig = /^https?:\/\//.test(target[0])
+    ? { url: target[0], ...(Object.keys(headers).length > 0 && { headers }) }
+    : { command: target[0], args: target.slice(1), ...(Object.keys(env).length > 0 && { env }) };
+  write(c.dim(`正在连接 ${name}……（第一次用 npx 要先下载，可能要等一会儿）\n`));
+  unregisterTools((t) => t.name.startsWith(mcpToolPrefix(name))); // 同名的旧服务器的工具先去掉
+  const { status, tools } = await addMcpServer(name, cfg, VERSION);
+  registerTools(tools);
+  if (status.ok) {
+    write(`${c.green("✓")} 已添加 ${c.bold(name)}，共 ${tools.length} 个工具：${c.dim(status.tools.map((t) => t.name).join("、"))}\n`);
+    write(c.dim(`已保存到 ${MCP_CONFIG_FILE}，下次启动会自动连接。导师现在就能用这些工具了。\n`));
+  } else {
+    write(`${c.red("✗")} 已保存到配置，但连接失败：${status.error}\n`);
+    write(c.dim(`检查命令或网址后，再运行一次 /mcp add ${name} … 覆盖；不要了就 /mcp remove ${name}\n`));
+  }
+}
+
+async function mcpRemove(name?: string) {
+  if (!name) return write("用法：/mcp remove 名字\n");
+  const existed = await removeMcpServer(name);
+  unregisterTools((t) => t.name.startsWith(mcpToolPrefix(name)));
+  write(existed ? c.green(`已删除 MCP 服务器 ${name}`) + "\n" : c.red(`没有叫 ${name} 的 MCP 服务器`) + "\n");
+}
+
+// 向模型服务查询有哪些模型（OpenAI 兼容接口的 GET /models），查不到就返回空列表
+async function listModels(client: OpenAI) {
+  const ids: string[] = [];
+  try {
+    for await (const m of client.models.list({ signal: AbortSignal.timeout(5000) })) {
+      ids.push(m.id);
+      if (ids.length >= 200) break;
+    }
+  } catch {}
+  return ids.sort();
+}
+
+const SKILL_EXAMPLE = `---
+name: weekly-review
+description: 帮学生做每周学习复盘。学生说"复盘一下""这周学了什么"时使用
+---
+1. 用 get_progress 看这周学完了哪些课
+2. 每节课问学生一个问题，检查还记不记得
+3. 把答不上来的知识点用 remember 记下来，下次上课先复习`;
+
+function showSkills(cwd: string, name?: string) {
+  const { skills, errors } = loadSkills(cwd);
+  if (name) {
+    const skill = skills.find((s) => s.name === name);
+    if (!skill) return write(c.red(`没有叫 ${name} 的技能，输入 /skills 查看全部`) + "\n");
+    write(`\n${c.bold(skill.name)} ${c.dim(`· ${skill.source}`)}\n${skill.description}\n`);
+    write(c.dim(skill.content.replace(/^/gm, "  │ ")) + "\n");
+    return;
+  }
+  write(c.dim("\n技能是写好的「做事方法说明书」：导师平时只看名字和说明，用得上时才读全文。也可以输入 /技能名 直接使用：\n"));
+  if (skills.length === 0) write(c.dim("  还没有技能\n"));
+  for (const s of skills) write(`  ${c.cyan("/" + s.name)} ${c.dim(s.source === "内置" ? "（内置）" : "（自定义）")}  ${s.description}\n`);
+  for (const e of errors) write(c.red(`  ✗ ${e.path}：${e.error}`) + "\n");
+  write(c.dim(`\n输入 /skills 名字 查看全文。想自己写技能：在下面任一目录里新建一个文件夹，里面放一个 SKILL.md（改完不用重启）：\n`));
+  for (const dir of skillDirs(cwd)) write(c.dim(`  ${dir}/技能名/SKILL.md\n`));
+  write(c.dim(`格式（和 Claude Code 的一样；文件夹里还可以放模板、例子等附件，导师需要时会读）：\n${SKILL_EXAMPLE}\n`));
+}
+
+const HOOKS_EXAMPLE = `{
+  "hooks": {
+    "PostToolUse": [{ "matcher": "write_file|edit_file", "command": "npx prettier --write \\"$AGENT_TUTOR_FILE\\"" }],
+    "PreToolUse": [{ "matcher": "run_command", "command": "grep -q 'rm -rf' && echo '不许删除文件' >&2 && exit 2 || exit 0" }],
+    "Stop": [{ "command": "afplay /System/Library/Sounds/Glass.aiff" }]
+  }
+}`;
+
+function showHooks() {
+  write(c.dim(`\n配置文件：${HOOKS_FILE}（改完马上生效，不用重启）\n`));
+  let hooks;
+  try {
+    hooks = loadHooks();
+  } catch (e) {
+    return write(c.red(e instanceof Error ? e.message : String(e)) + "\n");
+  }
+  const total = HOOK_EVENTS.reduce((n, e) => n + hooks[e].length, 0);
+  if (total > 0) {
+    for (const event of HOOK_EVENTS) {
+      for (const h of hooks[event]) write(`  ${c.cyan(event)}${h.matcher ? c.dim(` [${h.matcher}]`) : ""}  ${h.command}\n`);
+    }
+  } else write("还没有设置 hooks。\n");
+  write(c.dim(`
+Hooks 会在特定时刻自动运行你写的命令：
+  PreToolUse        导师调用工具之前（命令以退出码 2 结束 = 拦下这次调用，错误输出会告诉导师原因）
+  PostToolUse       工具执行完之后（比如写完文件自动格式化）
+  UserPromptSubmit  你发消息之后、导师回答之前（命令的输出会作为补充信息交给导师）
+  Stop              导师回答完一轮
+matcher 是匹配工具名的正则，不写就是所有工具。命令能从环境变量 AGENT_TUTOR_FILE 拿到文件路径，从标准输入拿到完整信息（JSON）。
+例子（和 Claude Code 的格式基本一样）：
+${HOOKS_EXAMPLE}
+`));
 }
 
 // 启动时连接 MCP 服务器，把它们的工具加进导师的工具列表
@@ -182,7 +305,7 @@ async function printMode(prompt: string) {
     process.exit(1);
   }
   const cwd = process.cwd();
-  registerTools([taskTool(cwd)]);
+  registerTools([taskTool(cwd), skillTool(cwd)]);
   const meter = new UsageMeter();
   const ctx: ToolContext = {
     client: new OpenAI({ apiKey: config.apiKey || "EMPTY", baseURL: config.baseURL }),
@@ -225,7 +348,8 @@ async function evalMode(args: string[]) {
     if (args[i] === "--only") only = args[++i];
     else if (!args[i].startsWith("-")) file ??= args[i];
   }
-  registerTools([taskTool(process.cwd())]);
+  registerTools([taskTool(process.cwd()), skillTool(process.cwd())]);
+  setHooksEnabled(false); // 评估要测的是导师本身，不受你自己设置的 hooks 影响
   try {
     const failed = await runEval(config, { file, only, verbose: args.includes("-v") });
     process.exit(failed ? 1 : 0);
@@ -335,6 +459,28 @@ async function main() {
   let controller: AbortController | null = null;
   rl.on("SIGINT", () => (controller ? controller.abort() : rl.close()));
 
+  async function switchModel(name: string) {
+    if (!name) {
+      write(`\n当前模型：${c.bold(config.model!)}\n`);
+      write(c.dim("正在向模型服务查询可用的模型……\n"));
+      const ids = await listModels(client);
+      setModelChoices([...ids, ...Object.keys(config.prices ?? {})], config.model!);
+      if (ids.length === 0) write(c.dim("这个模型服务没有提供模型列表，可以直接输入 /model 模型名 切换。\n"));
+      for (const id of ids.slice(0, 50)) write(`  ${id === config.model ? c.green("● " + id) : c.dim("○ ") + id}\n`);
+      if (ids.length > 50) write(c.dim(`  …共 ${ids.length} 个，输入 /model 加空格可以边打字边筛选\n`));
+      write(c.dim("输入 /model 模型名 切换（会保存为默认模型）。\n"));
+      return;
+    }
+    const known = await listModels(client);
+    config.model = name;
+    saveModel(name);
+    setModelChoices([...known, ...Object.keys(config.prices ?? {})], name);
+    write(c.green(`已切换到 ${name}，并保存为默认模型。`) + "\n");
+    if (known.length > 0 && !known.includes(name)) write(c.yellow("注意：模型服务的列表里没有这个名字，如果写错了，下一轮回答会报错。") + "\n");
+    if (!config.prices?.[name]) write(c.dim("这个模型还没填价格，/cost 算不出花费；需要的话在 /setup 里填。\n"));
+    if (process.env.MODEL_NAME) write(c.yellow(`注意：环境变量 MODEL_NAME=${process.env.MODEL_NAME} 的优先级更高，下次启动还会用它。`) + "\n");
+  }
+
   async function confirm(toolName: string, title: string, detail: string) {
     // 几个子 Agent 同时干活时可能同时来问，排好队一个一个问
     const ask = confirmQueue.then(() => askConfirm(toolName, title, detail));
@@ -358,12 +504,20 @@ async function main() {
     return answer === "y" || answer === "a";
   }
 
-  registerTools([taskTool(cwd)]);
+  registerTools([taskTool(cwd), skillTool(cwd)]);
   const mcpSummary = await setupMcp();
   write(`\n${c.bold("🤖 Agent 导师")} ${c.dim(`v${VERSION}`)}\n`);
   const search = searchConfig(config);
   write(c.dim(`模型：${config.model}    网页搜索：${search ? search.provider : "未开启（/setup 配置）"}\n`));
   write(c.dim("MCP：") + mcpSummary + "\n");
+  let hookCount = 0;
+  try {
+    hookCount = Object.values(loadHooks()).flat().length;
+  } catch {}
+  write(c.dim(`技能：${loadSkills(cwd).skills.length} 个（/skills 查看）    Hooks：${hookCount ? `${hookCount} 个` : "未设置（/hooks 查看说明）"}\n`));
+  // 模型列表：先放上配置里填过价格的，再到后台查一下模型服务有哪些模型（给 /model 的补全菜单用）
+  setModelChoices(Object.keys(config.prices ?? {}), config.model!);
+  listModels(client).then((ids) => setModelChoices([...ids, ...Object.keys(config.prices ?? {})], config.model!));
   write(c.dim(`练习目录：${cwd}\n`));
   if (instructionFiles(cwd).length) write(c.dim(`已读取你的说明文件 TUTOR.md\n`));
   write(c.dim("输入 /help 查看命令。试着说：你好，我想学 AI Agent\n"));
@@ -385,6 +539,7 @@ async function main() {
     }
     if (!input) continue;
 
+    let skillInput: string | undefined;
     if (input.startsWith("/")) {
       const [name, ...rest] = input.slice(1).split(/\s+/);
       const cmd = name.toLowerCase();
@@ -392,7 +547,14 @@ async function main() {
       if (cmd === "exit" || cmd === "quit") rl.close();
       else if (cmd === "help") write("\n" + helpText() + "\n");
       else if (cmd === "progress") showProgress();
-      else if (cmd === "mcp") showMcp(arg);
+      else if (cmd === "mcp") {
+        const [sub, ...args] = splitArgs(arg);
+        if (sub === "add") await mcpAdd(args);
+        else if (sub === "remove" || sub === "rm") await mcpRemove(args[0]);
+        else showMcp(arg);
+      } else if (cmd === "model") await switchModel(arg);
+      else if (cmd === "skills") showSkills(cwd, arg);
+      else if (cmd === "hooks") showHooks();
       else if (cmd === "agents") showAgents(cwd, arg);
       else if (cmd === "cost") showCost(meter, config);
       else if (cmd === "todos") printTodos();
@@ -416,8 +578,17 @@ async function main() {
       } else if (cmd === "setup") {
         config = await runSetup(rl);
         client = makeClient(config as Config);
-      } else write(c.red(`没有这个命令：${input}，输入 /help 查看`) + "\n");
-      continue;
+        setModelChoices(Object.keys(config.prices ?? {}), config.model!);
+      } else {
+        // 不是内置命令，看看是不是技能：/技能名 要求
+        const skill = loadSkills(cwd).skills.find((sk) => sk.name.toLowerCase() === cmd);
+        if (skill) {
+          write(tagLine("skill", `使用技能 ${skill.name}`) + "\n");
+          skillInput = skillMessage(skill, arg);
+        } else write(c.red(`没有这个命令：${input}，输入 /help 查看`) + "\n");
+      }
+      if (!skillInput) continue;
+      input = skillInput;
     }
 
     controller = new AbortController();
@@ -430,8 +601,16 @@ async function main() {
         continue;
       }
     }
+    // UserPromptSubmit hooks：可以拦下这条消息，或者给导师补充信息（比如当前时间、git 状态）
+    const hook = await runHooks("UserPromptSubmit", { prompt: input }, { cwd, signal: controller.signal });
+    if (hook.blocked) {
+      write(c.yellow("这条消息没有发给导师。") + "\n");
+      controller = null;
+      continue;
+    }
     const before = messages.length;
-    messages.push({ role: "user", content: input });
+    const extra = hook.output.length ? `\n\n（以下是学生设置的 hook 自动补充的信息）\n${hook.output.join("\n")}` : "";
+    messages.push({ role: "user", content: input + extra });
     const ctx: ToolContext = {
       client,
       model: config.model!,
@@ -462,11 +641,12 @@ async function main() {
       },
     };
     try {
-      await runTurn(messages, ctx, events);
+      const reply = await runTurn(messages, ctx, events);
       endThinking();
       md.flush();
       newline();
       saveSession(sessionId, cwd, messages); // 每说完一轮就存档
+      await runHooks("Stop", { reply: reply ?? "" }, { cwd });
     } catch (e) {
       messages.length = before; // 回滚这一轮，保证对话历史完整
       endThinking();

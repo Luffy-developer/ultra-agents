@@ -1,6 +1,7 @@
 // Agent 本体：人设 + Agent 循环（第 5 课）
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { runHooks } from "./hooks.js";
 import { loadInstructions } from "./memory.js";
 import { toolSchemas, TOOLS, type Tool, type ToolContext } from "./tools.js";
 import { readUsage } from "./usage.js";
@@ -18,7 +19,8 @@ export function systemPrompt(cwd: string, instructions = loadInstructions(cwd)) 
    如果已有进度，简单问好，并从下一节没学完的课继续。
 2. 按课程顺序教学，讲某节课之前先用 read_lesson 读讲义，以讲义为准，不要编造。
 3. 一次只讲一个知识点：多用生活比喻，少用术语，篇幅短，讲完问学生"听懂了吗？"
-4. 一节课讲完，用 task 派出题官出题（agent 填 quiz-maker，prompt 里写明课程文件名）。只把题目发给学生，参考答案和提示先藏好：
+4. 一节课讲完，用 task 派出题官出题（agent 填 quiz-maker，prompt 里写明课程文件名）。
+   出题官的题会自动交给审题官审核，不通过会退回修改；如果结果里 review.passed 是 false，你要自己检查一遍，有错先改再用。只把题目发给学生，参考答案和提示先藏好：
    学生答错时先给提示，再答错才讲解答案；学生答对后调用 save_progress 记录 completed_topic（课程文件名）。
 5. 学生没听懂就换个比喻重讲。
    记忆：发现学生的薄弱点、喜好、学习习惯时，用 remember 记下来，以后每节课都用得上。
@@ -48,7 +50,9 @@ export function systemPrompt(cwd: string, instructions = loadInstructions(cwd)) 
    讲到第 10 课（多 Agent）时，可以现场派一个子 Agent 做演示。
 13. 规划（todo_write 工具）：要做 3 步以上的任务时（带学生完成一个完整练习、修好一段报错的代码、给学生定学习计划），
    先用 todo_write 列出步骤再动手。开始做某一步时把它标成 in_progress，做完马上标成 completed，同一时间只有一项 in_progress。
-   简单的问答、讲一个知识点不用列清单。${
+   简单的问答、讲一个知识点不用列清单。
+14. 技能（use_skill 工具）：技能是写好的"做事方法说明书"。遇到 use_skill 说明里列出的情况时，先读技能说明再照着做。
+   学生输入 /技能名 时，消息里已经附上了技能说明，直接照着做就行。${
     instructions
       ? `
 
@@ -146,7 +150,13 @@ async function runTool(name: string, rawArgs: string, ctx: ToolContext, tools: T
   const tool = tools.find((t) => t.name === name);
   if (!tool) return { error: `没有这个工具：${name}` };
   try {
-    return (await tool.run(JSON.parse(rawArgs || "{}"), ctx)) ?? { ok: true };
+    const args = JSON.parse(rawArgs || "{}");
+    // 学生设置的 hooks：执行前可以拦下，执行后可以补充反馈（比如格式化、检查的结果）
+    const pre = await runHooks("PreToolUse", { tool: name, args }, ctx);
+    if (pre.blocked) return { error: `这次调用被学生设置的 hook 拦下了：${pre.blocked}` };
+    const result = (await tool.run(args, ctx)) ?? { ok: true };
+    const post = await runHooks("PostToolUse", { tool: name, args, result }, ctx);
+    return post.blocked ? { result, hook_feedback: post.blocked } : result;
   } catch (e) {
     if (ctx.signal.aborted) throw e; // 用户按了 Ctrl+C，整轮中断
     return { error: e instanceof Error ? e.message : String(e) }; // 把错误交给模型，让它自己纠正

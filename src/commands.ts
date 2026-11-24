@@ -3,7 +3,17 @@
 import type { Suggestion } from "./input.js";
 import { mcpStatuses } from "./mcp.js";
 import { listSessions } from "./session.js";
+import { loadSkills } from "./skills.js";
 import { loadAgents } from "./subagents.js";
+
+// /model 补全菜单里的模型：启动时从模型服务查一次，再加上用过的、配置里填了价格的
+let modelChoices: string[] = [];
+let currentModel = "";
+
+export function setModelChoices(models: string[], current: string) {
+  currentModel = current;
+  modelChoices = [...new Set([current, ...models])].filter(Boolean);
+}
 
 export interface Command {
   name: string;
@@ -44,16 +54,34 @@ export const COMMANDS: Command[] = [
   { name: "todos", description: "查看导师正在做的待办清单" },
   { name: "cost", description: "查看本次启动以来用了多少 token、花了多少钱" },
   {
-    name: "mcp",
-    description: "查看已连接的 MCP 服务器和工具",
-    argHint: "[服务器名]",
+    name: "model",
+    description: "查看可用的模型，或切换到另一个模型（会保存为默认）",
+    argHint: "[模型名]",
     args: () =>
-      mcpStatuses().map((s) => ({
+      modelChoices.map((m) => ({ value: `/model ${m}`, label: m, description: m === currentModel ? "当前使用中" : "" })),
+  },
+  {
+    name: "mcp",
+    description: "查看、添加、删除 MCP 服务器",
+    argHint: "[服务器名 | add | remove]",
+    args: () => [
+      { value: "/mcp add ", label: "add", description: "添加服务器：/mcp add 名字 命令或网址（马上连接，不用重启）" },
+      ...mcpStatuses().map((s) => ({
         value: `/mcp ${s.name}`,
         label: s.name,
         description: s.ok ? `${s.tools.length} 个工具：${s.tools.map((t) => t.name).join("、")}` : `连接失败：${s.error}`,
       })),
+      ...mcpStatuses().map((s) => ({ value: `/mcp remove ${s.name}`, label: `remove ${s.name}`, description: `删除服务器 ${s.name}` })),
+    ],
   },
+  {
+    name: "skills",
+    description: "查看可用的技能，以及怎么自己写技能",
+    argHint: "[名字]",
+    args: () =>
+      loadSkills(process.cwd()).skills.map((sk) => ({ value: `/skills ${sk.name}`, label: sk.name, description: sk.description })),
+  },
+  { name: "hooks", description: "查看设置好的 hooks，以及怎么设置" },
   {
     name: "agents",
     description: "查看导师可以派出的子 Agent，以及怎么自定义",
@@ -75,6 +103,7 @@ export function helpText() {
   return [
     "命令（输入 / 会弹出命令菜单，↑↓ 选择、Tab 补全）：",
     ...lines,
+    "  /技能名 [要求]       直接使用某个技能（输入 /skills 查看有哪些）",
     "正在回答时按 Ctrl+C 可以打断。",
     "启动参数：",
     "  agent-tutor --continue        接着这个目录里上次的对话",
@@ -89,15 +118,27 @@ export function suggestCommands(line: string): Suggestion[] {
   const space = line.indexOf(" ");
   if (space === -1) {
     const typed = line.slice(1).toLowerCase();
-    return COMMANDS.filter((cmd) => cmd.name.startsWith(typed)).map((cmd) => ({
+    const commands = COMMANDS.filter((cmd) => cmd.name.startsWith(typed)).map((cmd) => ({
       value: `/${cmd.name}`,
       label: `/${cmd.name}`,
       description: cmd.description,
       hasArgs: Boolean(cmd.args),
     }));
+    // 技能也能用 /技能名 直接使用（和内置命令重名的，内置命令优先）
+    const skills = loadSkills(process.cwd())
+      .skills.filter((sk) => sk.name.toLowerCase().startsWith(typed) && !COMMANDS.some((cmd) => cmd.name === sk.name))
+      .map((sk) => ({ value: `/${sk.name}`, label: `/${sk.name}`, description: `[技能] ${sk.description}`, hasArgs: true }));
+    return [...commands, ...skills];
   }
   const cmd = COMMANDS.find((c) => c.name === line.slice(1, space).toLowerCase());
   if (!cmd?.args) return [];
   const typedArg = line.slice(space + 1).trimStart().toLowerCase();
   return cmd.args().filter((s) => s.value.slice(cmd.name.length + 2).toLowerCase().startsWith(typedArg));
+}
+
+// 把一行命令拆成参数，支持用引号把带空格的内容括起来：/mcp add 名字 -H "Authorization: Bearer xx" https://...
+export function splitArgs(line: string) {
+  const args: string[] = [];
+  for (const m of line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) args.push(m[1] ?? m[2] ?? m[3]);
+  return args;
 }

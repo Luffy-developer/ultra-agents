@@ -394,6 +394,11 @@ export function registerTools(tools: Tool[]) {
   TOOLS.push(...tools);
 }
 
+// 去掉一批工具（比如删除 MCP 服务器时，去掉它提供的工具）
+export function unregisterTools(shouldRemove: (t: Tool) => boolean) {
+  for (let i = TOOLS.length - 1; i >= 0; i--) if (shouldRemove(TOOLS[i])) TOOLS.splice(i, 1);
+}
+
 export function toolLabel(name: string) {
   return TOOLS.find((t) => t.name === name)?.label;
 }

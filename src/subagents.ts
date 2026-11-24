@@ -2,19 +2,22 @@
 // - 每个子 Agent 有自己的人设和自己的 messages，看不到导师和学生的聊天记录，只能用分配给它的工具
 // - 子 Agent 自己跑一遍完整的 Agent 循环（复用 runTurn），做完只把结论交回给导师，中间过程不占导师的上下文
 // - 导师在同一步里派出好几个子 Agent 时，它们同时开工
+// - 反思：子 Agent 可以指定一个审核员，交结果前先审核，不通过就带着意见退回修改（出题官 → 审题官）
 // 除了内置的几个，学生还可以用 Markdown 文件定义自己的子 Agent（格式和 Claude Code 的 .claude/agents/*.md 一样）
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { runTurn, type Message } from "./agent.js";
 import { DATA_DIR } from "./config.js";
+import { NAME_PATTERN, parseFrontmatter } from "./frontmatter.js";
 import { TOOLS, toolLabel, type Tool, type ToolContext } from "./tools.js";
-import { printSubagentDone, printSubagentStep } from "./ui.js";
+import { c, newline, printSubagentDone, printSubagentStep, tagLine, write } from "./ui.js";
 
 export interface AgentDef {
   name: string;
   description: string; // 给导师看的：这个子 Agent 擅长什么、什么时候该派它
   tools?: string[]; // 能用哪些工具，mcp__* 表示所有 MCP 工具；不写就是"除了改学生记忆以外的全部工具"
   model?: string; // 不写就和导师用同一个模型（简单任务可以换便宜的小模型）
+  reviewer?: string; // 审核员（另一个子 Agent 的名字）：交结果前先请它检查，不通过就退回修改（反思）
   prompt: string; // 人设和做事方法
   source: string; // 定义在哪："内置"或文件路径
 }
@@ -29,6 +32,7 @@ const BUILTIN: AgentDef[] = [
     name: "quiz-maker",
     description: "出题官：根据某节课的讲义和学生的薄弱点出一道小测验，交回题目、参考答案和提示。prompt 里写明课程文件名",
     tools: ["read_lesson", "get_progress"],
+    reviewer: "quiz-reviewer",
     prompt: `你是「出题官」，只负责给小白出题，不负责讲课。
 1. 先用 read_lesson 读任务里指定的讲义，再用 get_progress 看学生的水平和薄弱点。
 2. 只考讲义里讲过的内容，题目要短、贴近生活，不考死记硬背；学生有相关的薄弱点就优先考。
@@ -36,6 +40,21 @@ const BUILTIN: AgentDef[] = [
 题目：……
 参考答案：……
 提示：……（学生答不出时给的提示）`,
+    source: "内置",
+  },
+  {
+    name: "quiz-reviewer",
+    description: "审题官：检查出题官出的题——是不是讲义里讲过的、参考答案对不对、提示有没有泄露答案。出题官出完题会自动请它审核，一般不用单独派",
+    tools: ["read_lesson"],
+    prompt: `你是「审题官」，负责检查别人出的小测验，不负责出题。
+1. 先用 read_lesson 读任务里提到的讲义。
+2. 逐条检查：
+   ① 题目考的是讲义里讲过的内容
+   ② 参考答案正确，和讲义说的一致
+   ③ 提示能帮学生想到答案，但没有直接把答案说出来
+   ④ 题目简短清楚，小白看得懂
+3. 第一行只写「结论：通过」或「结论：不通过」；不通过时，后面逐条写出问题和修改建议。
+   只挑真正影响学生的问题，不要吹毛求疵。`,
     source: "内置",
   },
   {
@@ -64,20 +83,23 @@ export function agentDirs(cwd: string) {
 
 // 解析 Markdown 文件：开头 --- 之间是 名字/说明/工具/模型，后面的正文是人设
 function parseAgentFile(path: string): AgentDef {
-  const text = readFileSync(path, "utf-8");
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!m) throw new Error("开头缺少 --- 包起来的 name、description");
-  const meta: Record<string, string> = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = line.match(/^\s*(\w+)\s*:\s*(.*?)\s*$/);
-    if (kv) meta[kv[1]] = kv[2].replace(/^["']|["']$/g, "");
-  }
+  const parsed = parseFrontmatter(readFileSync(path, "utf-8"));
+  if (!parsed) throw new Error("开头缺少 --- 包起来的 name、description");
+  const { meta, body } = parsed;
   const name = meta.name || basename(path, ".md");
-  if (!/^[\w一-龥-]+$/.test(name)) throw new Error(`名字只能用字母、数字、中文、- 和 _：${name}`);
+  if (!NAME_PATTERN.test(name)) throw new Error(`名字只能用字母、数字、中文、- 和 _：${name}`);
   if (!meta.description) throw new Error("缺少 description（导师靠它判断什么时候派这个子 Agent）");
-  if (!m[2].trim()) throw new Error("正文是空的，请写上这个子 Agent 的人设和做事方法");
+  if (!body) throw new Error("正文是空的，请写上这个子 Agent 的人设和做事方法");
   const tools = meta.tools?.split(/[,，\s]+/).filter(Boolean);
-  return { name, description: meta.description, tools: tools?.length ? tools : undefined, model: meta.model || undefined, prompt: m[2].trim(), source: path };
+  return {
+    name,
+    description: meta.description,
+    tools: tools?.length ? tools : undefined,
+    model: meta.model || undefined,
+    reviewer: meta.reviewer || undefined,
+    prompt: body,
+    source: path,
+  };
 }
 
 // 每次用到都重新读文件：改完子 Agent 的定义不用重启就能生效
@@ -123,13 +145,10 @@ function subagentPrompt(agent: AgentDef, cwd: string) {
 ${agent.prompt}`;
 }
 
-async function runSubagent(args: { agent: string; description?: string; prompt: string }, ctx: ToolContext) {
-  const { agents } = loadAgents(ctx.cwd);
-  const agent = agents.find((a) => a.name === args.agent);
-  if (!agent) return { error: `没有这个子 Agent：${args.agent}，可用的有：${agents.map((a) => a.name).join("、")}` };
+const MAX_REVISIONS = 2; // 审核不通过时最多退回修改几次，防止一直改不完
 
-  const started = Date.now();
-  let steps = 0;
+// 子 Agent 在自己的 messages 上跑一轮 Agent 循环；steps 用来统计一共用了几次工具
+async function runAgentTurn(agent: AgentDef, messages: Message[], ctx: ToolContext, stats: { steps: number }) {
   const subCtx: ToolContext = {
     ...ctx,
     model: agent.model ?? ctx.model,
@@ -137,27 +156,78 @@ async function runSubagent(args: { agent: string; description?: string; prompt: 
     confirm: (tool, title, detail) => ctx.confirm(tool, `${title}（子 Agent ${agent.name} 发起）`, detail),
     onUsage: (model, usage) => ctx.onUsage?.(model, usage, true),
   };
+  const events = {
+    onText: () => {}, // 子 Agent 一边想一边说的话不显示，学生只看到它用了哪些工具
+    onToolCall: (name: string, rawArgs: string) => {
+      stats.steps++;
+      printSubagentStep(agent.name, name, rawArgs, toolLabel(name));
+    },
+  };
+  return runTurn(messages, subCtx, events, toolsFor(agent));
+}
+
+// 反思：请审核员检查子 Agent 交出的结果。审核员第一行写「结论：通过」或「结论：不通过」
+async function review(reviewer: AgentDef, agent: AgentDef, task: string, result: string, ctx: ToolContext, stats: { steps: number }) {
+  newline();
+  write(tagLine("agent", `${reviewer.name} 审核 ${agent.name} 的结果`, 5) + "\n");
+  const messages: Message[] = [
+    { role: "system", content: subagentPrompt(reviewer, ctx.cwd) },
+    { role: "user", content: `交给 ${agent.name} 的原任务：\n${task}\n\n${agent.name} 交出的结果：\n${result}\n\n请检查这份结果。` },
+  ];
+  const text = (await runAgentTurn(reviewer, messages, ctx, stats)) ?? "";
+  const passed = !/结论[:：]\s*不通过/.test(text); // 没按格式写结论的，当作通过，避免卡住
+  const reason = text.replace(/^.*结论[:：].*\n?/, "").trim().split("\n")[0] ?? "";
+  return { passed, text: text.trim(), reason };
+}
+
+async function runSubagent(args: { agent: string; description?: string; prompt: string }, ctx: ToolContext) {
+  const { agents } = loadAgents(ctx.cwd);
+  const agent = agents.find((a) => a.name === args.agent);
+  if (!agent) return { error: `没有这个子 Agent：${args.agent}，可用的有：${agents.map((a) => a.name).join("、")}` };
+  const reviewer = agent.reviewer ? agents.find((a) => a.name === agent.reviewer && a.name !== agent.name) : undefined;
+
+  const started = Date.now();
+  const stats = { steps: 0 };
   const messages: Message[] = [
     { role: "system", content: subagentPrompt(agent, ctx.cwd) },
     { role: "user", content: args.prompt },
   ];
-  const events = {
-    onText: () => {}, // 子 Agent 一边想一边说的话不显示，学生只看到它用了哪些工具
-    onToolCall: (name: string, rawArgs: string) => {
-      steps++;
-      printSubagentStep(agent.name, name, rawArgs, toolLabel(name));
-    },
-  };
   let result: string | undefined;
+  let verdict: Awaited<ReturnType<typeof review>> | undefined;
+  let revisions = 0;
   try {
-    result = await runTurn(messages, subCtx, events, toolsFor(agent));
+    result = await runAgentTurn(agent, messages, ctx, stats);
+    // 有审核员就先审核：不通过就带着审核意见退回去改，改完再审，最多改 MAX_REVISIONS 次
+    while (result !== undefined && reviewer) {
+      verdict = await review(reviewer, agent, args.prompt, result, ctx, stats);
+      if (verdict.passed) {
+        write(tagLine("agent", `${reviewer.name}：通过`, 5) + "\n");
+        break;
+      }
+      if (revisions >= MAX_REVISIONS) {
+        write(c.yellow(`     ⎿ [agent]${reviewer.name}：改了 ${revisions} 次还有问题，交给导师判断`) + "\n");
+        break;
+      }
+      revisions++;
+      write(tagLine("agent", `${reviewer.name}：不通过，退回修改（第 ${revisions} 次）${verdict.reason ? ` · ${verdict.reason.slice(0, 60)}` : ""}`, 5) + "\n");
+      messages.push({ role: "user", content: `审核意见（来自 ${reviewer.name}）：\n${verdict.text}\n\n请根据审核意见修改，重新给出完整的结果。` });
+      result = await runAgentTurn(agent, messages, ctx, stats);
+    }
   } catch (e) {
-    if (!ctx.signal.aborted) printSubagentDone(agent.name, steps, Date.now() - started, false);
+    if (!ctx.signal.aborted) printSubagentDone(agent.name, stats.steps, Date.now() - started, false);
     throw e; // runTool 会把错误交给导师
   }
-  printSubagentDone(agent.name, steps, Date.now() - started, result !== undefined);
+  printSubagentDone(agent.name, stats.steps, Date.now() - started, result !== undefined);
   if (result === undefined) return { error: `子 Agent ${agent.name} 步骤太多，没能完成。可以把任务拆小一点再派` };
-  return { agent: agent.name, result: result.length > MAX_RESULT ? result.slice(0, MAX_RESULT) + "\n…（结果过长，已截断）" : result };
+  return {
+    agent: agent.name,
+    result: result.length > MAX_RESULT ? result.slice(0, MAX_RESULT) + "\n…（结果过长，已截断）" : result,
+    ...(verdict && {
+      review: verdict.passed
+        ? { reviewer: reviewer!.name, passed: true, revisions }
+        : { reviewer: reviewer!.name, passed: false, revisions, comments: verdict.text, tip: "审核没通过，请你自己判断这份结果能不能用，必要时修改后再给学生" },
+    }),
+  };
 }
 
 // 派子 Agent 的工具。说明和可选的子 Agent 每次现算，新加的自定义子 Agent 导师马上就能看到
