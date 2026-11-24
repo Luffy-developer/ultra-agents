@@ -1,4 +1,4 @@
-// 自动化评估（第 11 课）：准备一组测试题，一键跑完，检查导师有没有按规矩做事
+// 自动化评估（第 13 课）：准备一组测试题，一键跑完，检查导师有没有按规矩做事
 // 每道题：准备好假的学习进度和练习文件 → 让导师回答 → 用规则检查（调用了哪些工具、回答里有没有某些字、文件改对了没有）
 //        → 再请一个模型当评委，按评分标准判断合不合格（LLM-as-judge）
 // 改了 System Prompt、工具或换了模型之后跑一遍，就知道有没有把原来好好的地方改坏
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { runTurn, systemPrompt, type Message } from "./agent.js";
 import { type Config, DATA_DIR, searchConfig } from "./config.js";
-import { useInMemoryProgress } from "./memory.js";
+import { type FakeProgress, useInMemoryProgress } from "./memory.js";
 import { clearTodos } from "./todo.js";
 import { toolLabel, type ToolContext } from "./tools.js";
 import * as activity from "./activity.js";
@@ -19,7 +19,7 @@ import { readUsage, UsageMeter, usageLine } from "./usage.js";
 export interface EvalCase {
   name: string;
   input: string | string[]; // 学生说的话；多轮对话写成数组，按顺序一句句说
-  progress?: { level?: string; completed?: string[]; memories?: string[] }; // 假的学习进度，不填就是新同学
+  progress?: FakeProgress; // 假的学习进度（可以带档位和错题本），不填就是新同学
   files?: Record<string, string>; // 练习目录里预先放好的文件
   tutor?: string; // 假的 TUTOR.md 内容
   expect: {
@@ -47,8 +47,8 @@ interface CaseResult {
 
 export const DEFAULT_CASES = fileURLToPath(new URL("../evals/cases.json", import.meta.url));
 
-// 评估时允许在临时练习目录里写文件、改文件（目录是临时建的，测完就删）；运行命令、MCP 工具一律拒绝
-const ALLOWED = new Set(["write_file", "edit_file"]);
+// 评估时允许在临时练习目录里写文件、改文件、领取作业（目录是临时建的，测完就删）；运行命令、MCP 工具一律拒绝
+const ALLOWED = new Set(["write_file", "edit_file", "start_homework"]);
 
 const JUDGE_PROMPT = `你是一位严格、公正的评委，负责检查「AI Agent 入门导师」（一个教小白学 AI Agent 的 AI）在一段对话里的表现。
 根据评分标准判断是否合格。只看对话里实际发生的事，不要脑补。

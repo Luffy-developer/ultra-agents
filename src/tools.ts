@@ -1,11 +1,11 @@
 // 工具：Agent 能"动手"做的事。每个工具 = 说明书（给模型看） + run 函数（真正执行）
-import { exec } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { exec, execFile } from "node:child_process";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type OpenAI from "openai";
 import type { ChatCompletionFunctionTool } from "openai/resources/chat/completions";
-import { forget, progressForModel, remember, saveProgress, updateMemory } from "./memory.js";
+import { forget, progressForModel, recordAnswer, remember, saveProgress, updateMemory } from "./memory.js";
 import { TODO_TOOL } from "./todo.js";
 import type { Usage } from "./usage.js";
 import { type SearchConfig, webFetch, webSearch } from "./web.js";
@@ -48,6 +48,84 @@ export function readLesson(filename: string) {
   const path = join(LESSONS_DIR, filename.split(/[\\/]/).pop()!); // 只允许读 lessons 目录
   if (!existsSync(path)) return { error: `没有这节课：${filename}，可用课程：${listLessons().join("、")}` };
   return { content: readFileSync(path, "utf-8") };
+}
+
+// ---------- 动手作业（在包的 exercises/ 目录） ----------
+// 每份作业一个文件夹：starter/ 里是发给学生的题目和代码框架，check.py 是检查脚本。
+// 检查脚本留在包里不发给学生，这样学生（或导师）改不了检查标准。
+// 作业里用假的大模型（fake_llm.py）代替真的 API：不花钱，每次结果都一样，才能自动检查
+const EXERCISES_DIR = fileURLToPath(new URL("../exercises/", import.meta.url));
+const CHECK_TIMEOUT = 20_000; // 学生的代码可能写出死循环，超时就停
+
+export function listExercises() {
+  if (!existsSync(EXERCISES_DIR)) return [];
+  return readdirSync(EXERCISES_DIR)
+    .filter((name) => existsSync(join(EXERCISES_DIR, name, "check.py")))
+    .sort();
+}
+
+function exerciseDir(name: string) {
+  const safe = name.split(/[\\/]/).pop()!;
+  const dir = join(EXERCISES_DIR, safe);
+  if (!existsSync(join(dir, "check.py"))) throw new Error(`没有这份作业：${name}，可用的作业：${listExercises().join("、") || "无"}`);
+  return { safe, dir };
+}
+
+async function startHomework(args: { exercise: string }, ctx: ToolContext) {
+  const { safe, dir } = exerciseDir(args.exercise);
+  const target = insideCwd(ctx, safe);
+  const files = walk(join(dir, "starter"));
+  const exists = files.filter((f) => existsSync(join(target, f)));
+  if (exists.length === files.length) {
+    return { ok: true, folder: safe, files, note: "练习目录里已经有这份作业了，没有覆盖。学生可以接着写" };
+  }
+  const list = files.map((f) => `${safe}/${f}${exists.includes(f) ? "（已存在，保留不动）" : ""}`).join("\n");
+  if (!(await ctx.confirm("start_homework", `领取作业：把作业文件放进练习目录的 ${safe}/`, list))) {
+    return { error: "学生拒绝了领取作业，请问问学生原因" };
+  }
+  cpSync(join(dir, "starter"), target, { recursive: true, force: false });
+  return { ok: true, folder: safe, files, readme: readFileSync(join(dir, "starter", "README.md"), "utf-8") };
+}
+
+// 找一个能用的 Python 3：python3 → python → 系统自带的 /usr/bin/python3（有的电脑上前两个装坏了）
+let python: string | undefined;
+
+function tryPython(cmd: string) {
+  return new Promise<boolean>((done) =>
+    execFile(cmd, ["--version"], { timeout: 5000 }, (err, stdout, stderr) => done(!err && /Python 3\./.test(stdout + stderr))),
+  );
+}
+
+async function findPython() {
+  if (python) return python;
+  for (const cmd of ["python3", "python", "/usr/bin/python3"]) {
+    if (await tryPython(cmd)) return (python = cmd);
+  }
+  return undefined;
+}
+
+// 运行检查脚本：它会导入学生写的代码，跑一组测试，最后输出一行 JSON
+// {"status": "pass|fail|error", "tests": [{"name", "status", "message"}], "output": 学生代码打印的内容}
+async function checkHomework(args: { exercise: string }, ctx: ToolContext) {
+  const { safe, dir } = exerciseDir(args.exercise);
+  const folder = insideCwd(ctx, safe);
+  if (!existsSync(folder)) return { error: `练习目录里还没有 ${safe}/，先用 start_homework 领取作业` };
+  const py = await findPython();
+  if (!py) return { error: "这台电脑上找不到 Python 3。请学生先安装 Python（https://www.python.org/downloads/），装好后重新打开终端再试" };
+  return new Promise((done) => {
+    execFile(py, [join(dir, "check.py"), folder], { cwd: folder, timeout: CHECK_TIMEOUT, signal: ctx.signal }, (err, stdout, stderr) => {
+      if ((err as any)?.killed) {
+        done({ status: "error", message: `运行超过 ${CHECK_TIMEOUT / 1000} 秒被停止了，学生的代码可能有死循环（比如 Agent 循环没有设最大步数）` });
+        return;
+      }
+      const last = stdout.trim().split("\n").pop() ?? "";
+      try {
+        done(JSON.parse(last));
+      } catch {
+        done({ status: "error", message: "检查脚本没能正常运行", stderr: truncate(stderr || stdout) });
+      }
+    });
+  });
 }
 
 // ---------- 练习目录里的文件和命令（像 Claude Code 一样动手） ----------
@@ -235,15 +313,59 @@ export const TOOLS: Tool[] = [
   {
     name: "save_progress",
     label: "保存学习进度",
-    description: "更新学生的水平，或记录刚学完的课程",
+    description: "更新学生的水平、档位，或记录刚学完的课程",
     parameters: {
       type: "object",
       properties: {
-        level: str("如：零基础/入门/进阶"),
+        level: str("一句话描述学生的基础，如：会 Python，用过 ChatGPT，没写过 Agent"),
+        track: { type: "string", enum: ["基础", "进阶"], description: "档位：基础档只学讲义的「基础」部分，进阶档两部分都学" },
         completed_topic: str("刚学完的课程文件名"),
       },
     },
     run: saveProgress,
+  },
+  {
+    name: "record_answer",
+    label: "记录答题",
+    description:
+      "学生答完一道题（测验题、复习题都算）后调用，按最终结果记录：用了提示才答对算答对，看了讲解才明白算答错。" +
+      "答错的题会自动记进错题本，以后按间隔复习；复习错题本里的题时要带上 review_id。返回这节课累计答对、答错几次",
+    parameters: {
+      type: "object",
+      properties: {
+        lesson: str("课程文件名"),
+        topic: str("这道题考的知识点，简短，如：工具调用由谁执行"),
+        question: str("题目原文"),
+        correct: { type: "boolean", description: "是否答对" },
+        mistake: str("答错时写清错在哪里，如：以为是模型自己执行了函数"),
+        review_id: str("复习错题本里的题时填它的 id，如 r2"),
+      },
+      required: ["lesson", "topic", "question", "correct"],
+    },
+    run: recordAnswer,
+  },
+  {
+    name: "start_homework",
+    label: "领取作业",
+    get description() {
+      return `把一份动手作业（题目说明 + 代码框架）放进学生练习目录的同名文件夹（会先征求学生同意，已有的文件不会覆盖）。
+讲义里写了「动手作业」的课才有作业。可用的作业：${listExercises().join("、") || "无"}`;
+    },
+    get parameters() {
+      return { type: "object", properties: { exercise: { type: "string", enum: listExercises(), description: "作业名" } }, required: ["exercise"] };
+    },
+    run: startHomework,
+  },
+  {
+    name: "check_homework",
+    label: "检查作业",
+    description:
+      "运行作业的检查脚本，检查学生写的代码，返回每项测试是否通过和没通过的原因。" +
+      "检查用的是假的大模型，不花钱。学生说写好了就调用，不用征求同意",
+    get parameters() {
+      return { type: "object", properties: { exercise: { type: "string", enum: listExercises(), description: "作业名" } }, required: ["exercise"] };
+    },
+    run: checkHomework,
   },
   {
     name: "remember",

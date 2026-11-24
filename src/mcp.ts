@@ -1,4 +1,4 @@
-// MCP 客户端：让导师用上别人写好的工具（第 9 课）
+// MCP 客户端：让导师用上别人写好的工具（第 10 课）
 // MCP（Model Context Protocol）是给 Agent 用的"标准插头"：
 // 工具做成独立的 MCP 服务器程序，任何支持 MCP 的 Agent（Claude Code、Cursor、本项目……）都能连上它、使用它的工具。
 //

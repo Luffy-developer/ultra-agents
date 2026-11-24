@@ -1,4 +1,4 @@
-// 网页工具：让 Agent 上网（第 8 课）
+// 网页工具：让 Agent 上网（第 9 课）
 // web_search：调用搜索 API，拿回「标题 + 网址 + 摘要」
 // web_fetch：下载某个网页，去掉导航栏、广告等，只留正文
 import { Readability } from "@mozilla/readability";

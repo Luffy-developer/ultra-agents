@@ -11,7 +11,7 @@ import { HOOK_EVENTS, HOOKS_FILE, loadHooks, runHooks, setHooksEnabled } from ".
 import { attachCompletion } from "./input.js";
 import { MarkdownStream, plainText } from "./markdown.js";
 import { addMcpServer, closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses, mcpToolPrefix, removeMcpServer, type ServerConfig } from "./mcp.js";
-import { getProgress, instructionFiles } from "./memory.js";
+import { dueReviews, getProgress, instructionFiles } from "./memory.js";
 import { runEval } from "./eval.js";
 import { cleanupSessions, latestSession, loadSession, newSessionId, saveSession } from "./session.js";
 import { loadSkills, skillDirs, skillMessage, skillTool } from "./skills.js";
@@ -37,9 +37,20 @@ function explainError(e: unknown) {
 
 function showProgress() {
   const p = getProgress();
-  write(`\n水平：${p.level}\n`);
+  write(`\n水平：${p.level}\n档位：${p.track ? `${p.track}档` : "还没选（导师上课时会先摸底）"}\n`);
   for (const lesson of listLessons()) {
-    write(`  ${p.completed.includes(lesson) ? c.green("✓") : c.dim("○")} ${lesson.replace(/\.md$/, "")}\n`);
+    const stat = p.answers[lesson];
+    const score = stat ? c.dim(`  答对 ${stat.right} 次，答错 ${stat.wrong} 次`) : "";
+    const note = lesson.startsWith("14-") ? c.dim("（只有进阶档学）") : "";
+    write(`  ${p.completed.includes(lesson) ? c.green("✓") : c.dim("○")} ${lesson.replace(/\.md$/, "")}${note}${score}\n`);
+  }
+  const due = dueReviews(p);
+  if (p.reviews.length) {
+    write(`\n错题本：${p.reviews.length} 个知识点${due.length ? `，今天要复习 ${due.length} 个` : ""}\n`);
+    for (const r of p.reviews) {
+      const when = due.includes(r) ? c.yellow("今天复习") : c.dim(`${r.due} 复习`);
+      write(`  ${c.dim(`第 ${r.box} 盒`)} ${r.topic} ${c.dim(`（${r.lesson.replace(/\.md$/, "")}）`)} ${when}\n`);
+    }
   }
   write(c.dim(`导师记住了你 ${p.memories.length} 件事，输入 /memory 查看\n`));
 }

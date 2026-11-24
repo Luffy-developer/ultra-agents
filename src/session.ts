@@ -1,4 +1,4 @@
-// 会话保存与恢复（第 6 课：短期记忆也能存下来）
+// 会话保存与恢复（第 7 课：短期记忆也能存下来）
 // 每说完一轮就把整段对话存成一个文件，下次用 agent-tutor --continue 或 /resume 接着聊
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

@@ -4,21 +4,21 @@
     "input": "你好，我想学 AI Agent",
     "expect": {
       "tools": ["get_progress"],
-      "judge": "导师向学生问了摸底问题（比如会不会编程、有没有用过 ChatGPT 之类的 AI 工具），而不是一上来就长篇讲课"
+      "judge": "导师向学生问了摸底问题（比如会不会编程、有没有用过 ChatGPT 之类的 AI 工具），而不是一上来就长篇讲课；一次没有抛出一大串问题"
     }
   },
   {
     "name": "老同学：接着上次的进度讲",
-    "progress": { "level": "零基础", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md"] },
+    "progress": { "level": "零基础", "track": "基础", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md"] },
     "input": "继续上课吧",
     "expect": {
       "tools": ["read_lesson"],
-      "judge": "导师开始讲第 3 课（用代码调用大模型 API）的内容，而不是重讲第 1、2 课；一次只讲一个知识点，篇幅不长，讲完问学生听懂了没有"
+      "judge": "导师开始讲第 3 课（用代码调用大模型 API）的内容，而不是重讲第 1、2 课；篇幅不长；可以先问一个了解学生基础的引导问题再讲，也可以直接讲一个知识点；如果讲了，结尾没有简单地问「听懂了吗」，而是提了一个需要动脑回答的问题（检查题、让学生复述或预测）"
     }
   },
   {
     "name": "出题：派出题官，不泄露答案",
-    "progress": { "level": "零基础", "completed": ["01-大模型是什么.md"] },
+    "progress": { "level": "零基础", "track": "基础", "completed": ["01-大模型是什么.md"] },
     "input": "第 1 课我学完了，出道题考考我吧",
     "expect": {
       "tools": ["task:quiz-maker"],
@@ -27,7 +27,7 @@
   },
   {
     "name": "记忆：记下学生的薄弱点",
-    "progress": { "level": "零基础", "completed": ["01-大模型是什么.md"] },
+    "progress": { "level": "零基础", "track": "基础", "completed": ["01-大模型是什么.md"] },
     "input": "说实话我完全不会编程，一看到代码就头疼",
     "expect": {
       "tools": ["remember|update_memory"],
@@ -56,7 +56,7 @@
   },
   {
     "name": "精确修改：只改需要改的地方",
-    "progress": { "level": "入门", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
+    "progress": { "level": "入门", "track": "进阶", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
     "files": {
       "hello.js": "// 打招呼的小程序\nconst name = \"World\";\nconsole.log(\"Hello, \" + name);\n"
     },
@@ -69,7 +69,7 @@
   },
   {
     "name": "搜索代码：用 grep 找到用法",
-    "progress": { "level": "入门", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
+    "progress": { "level": "入门", "track": "进阶", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
     "files": {
       "main.js": "import { ask } from \"./src/api.js\";\nconsole.log(await ask(\"你好\"));\n",
       "src/api.js": "export async function ask(question) {\n  const resp = await fetch(process.env.BASE_URL + \"/chat/completions\", { method: \"POST\" });\n  return resp.json();\n}\n",
@@ -83,7 +83,7 @@
   },
   {
     "name": "规划：多步任务先列待办清单",
-    "progress": { "level": "入门", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
+    "progress": { "level": "入门", "track": "进阶", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
     "input": "带我做一个完整的小练习：先写一个调用大模型 API 的脚本 chat.js，再给它加上详细的中文注释，最后写一个 README.md 说明怎么运行。不用问我，直接开始做吧",
     "expect": {
       "tools": ["todo_write", "write_file"],
@@ -93,11 +93,84 @@
   },
   {
     "name": "课外问题：答完引导回课程",
-    "progress": { "level": "零基础", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md"] },
+    "progress": { "level": "零基础", "track": "基础", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md"] },
     "input": "今天晚饭吃什么好？",
     "expect": {
       "notTools": ["web_search", "task"],
       "judge": "导师简短地回应了这个问题（或者友好地婉拒），然后把话题引导回 AI Agent 的课程"
+    }
+  },
+  {
+    "name": "复习：先复习到期的错题，换一道新题",
+    "progress": {
+      "level": "零基础，用过 ChatGPT",
+      "track": "基础",
+      "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md", "04-工具调用.md"],
+      "reviews": [
+        { "lesson": "04-工具调用.md", "topic": "工具由谁执行", "question": "在 Function Calling 中，到底是谁真正执行了函数？", "mistake": "以为是模型自己执行了函数" }
+      ]
+    },
+    "input": "继续上课吧",
+    "expect": {
+      "tools": ["get_progress"],
+      "judge": "导师在讲新课之前，先出了一道考「工具由谁执行」这个知识点的复习题；题目换了场景或说法，不是把原题「在 Function Calling 中，到底是谁真正执行了函数？」原样再问一遍；没有把答案直接告诉学生"
+    }
+  },
+  {
+    "name": "答错：先给提示，不直接给答案",
+    "progress": { "level": "零基础", "track": "基础", "completed": ["01-大模型是什么.md"] },
+    "input": ["第 1 课学完了，出道题考考我吧", "我不知道"],
+    "expect": {
+      "tools": ["task:quiz-maker"],
+      "judge": "学生说「我不知道」之后，导师给了一个提示（比如一个引导性的问题，或指出该往哪方面想），让学生自己再想；没有直接把答案讲出来"
+    }
+  },
+  {
+    "name": "作业：检查通过后点评代码",
+    "progress": { "level": "会 Python", "track": "进阶", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
+    "files": {
+      "04-tool-calling/tools.py": "# 第 4 课作业：给 Agent 做一个「查天气」工具\nimport json\n\nFORECAST = {\n    \"北京\": [\"晴，3~12°C\", \"多云，2~10°C\", \"小雪，-3~2°C\"],\n    \"上海\": [\"小雨，10~15°C\", \"阴，11~16°C\", \"晴，12~18°C\"],\n    \"广州\": [\"多云，18~25°C\", \"晴，19~27°C\", \"雷阵雨，20~26°C\"],\n}\n\n\ndef get_weather(city, days=1):\n    if city not in FORECAST:\n        return None\n    return \"\\n\".join(\"{}第 {} 天：{}\".format(city, i + 1, w) for i, w in enumerate(FORECAST[city][:days]))\n\n\nTOOLS = [\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_weather\",\n            \"description\": \"查询某个城市未来几天的天气预报。用户问到天气、要不要带伞、穿什么衣服时使用\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"city\": {\"type\": \"string\", \"description\": \"城市名，如：北京\"},\n                    \"days\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 3, \"description\": \"查未来几天，默认 1\"},\n                },\n                \"required\": [\"city\"],\n            },\n        },\n    }\n]\n\n\ndef run_tool(name, arguments):\n    if name != \"get_weather\":\n        return \"没有工具 {}，可用的工具：get_weather\".format(name)\n    try:\n        args = json.loads(arguments)\n    except json.JSONDecodeError:\n        return '参数不是合法的 JSON，正确的写法如：{\"city\": \"北京\"}'\n    city = args.get(\"city\")\n    if not city:\n        return '缺少参数 city，正确的写法如：{\"city\": \"北京\"}'\n    days = args.get(\"days\", 1)\n    if not isinstance(days, int) or not 1 <= days <= 3:\n        return \"days 只能是 1~3 的整数\"\n    result = get_weather(city, days)\n    if result is None:\n        return \"查不到 {} 的天气，支持的城市：{}\".format(city, \"、\".join(FORECAST))\n    return result\n"
+    },
+    "input": "第 4 课的作业我写好了，帮我检查一下",
+    "expect": {
+      "tools": ["check_homework"],
+      "notTools": ["write_file", "edit_file"],
+      "judge": "导师运行检查后告诉学生基础和进阶测试都通过了，并且看了代码、给出了具体的点评（写得好的地方或可以改进的地方）"
+    }
+  },
+  {
+    "name": "作业：没通过时讲原因，不替学生写答案",
+    "progress": { "level": "会一点 Python", "track": "基础", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md"] },
+    "files": {
+      "04-tool-calling/tools.py": "# 第 4 课作业：给 Agent 做一个「查天气」工具（题目见 README.md）\nimport json\n\n# 假的天气数据（真实项目里，这里会去调用天气网站的 API）\nFORECAST = {\n    \"北京\": [\"晴，3~12°C\", \"多云，2~10°C\", \"小雪，-3~2°C\"],\n    \"上海\": [\"小雨，10~15°C\", \"阴，11~16°C\", \"晴，12~18°C\"],\n    \"广州\": [\"多云，18~25°C\", \"晴，19~27°C\", \"雷阵雨，20~26°C\"],\n}\n\n\ndef get_weather(city, days=1):\n    \"\"\"查天气。查不到这个城市就返回 None。days 是查几天（这个函数不检查范围，检查要在 run_tool 里做）\"\"\"\n    if city not in FORECAST:\n        return None\n    return \"\\n\".join(\"{}第 {} 天：{}\".format(city, i + 1, w) for i, w in enumerate(FORECAST[city][:days]))\n\n\n# TODO 1：补全工具说明书（格式和 OpenAI 的 tools 参数一样）\nTOOLS = [\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_weather\",\n            \"description\": \"\",  # 写清楚这个工具做什么、什么时候该用\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    # 在这里写参数 city\n                },\n                \"required\": [],  # 哪些参数是必填的\n            },\n        },\n    }\n]\n\n\ndef run_tool(name, arguments):\n    \"\"\"执行模型想调用的工具，返回交回给模型的文字。\n\n    name：工具名，如 \"get_weather\"\n    arguments：模型给的参数，是一段 JSON 文本，如 '{\"city\": \"北京\"}'\n    出错时不要抛出异常，而是返回一段说明，告诉模型错在哪、该怎么改\n    \"\"\"\n    # TODO 2：写出这个函数，写完把下面这行删掉\n    raise NotImplementedError(\"run_tool 还没写\")\n"
+    },
+    "input": "第 4 课的作业帮我检查一下",
+    "expect": {
+      "tools": ["check_homework"],
+      "notTools": ["write_file", "edit_file"],
+      "judge": "导师告诉学生哪些检查没通过、原因是什么，并给出思路或提示；没有直接写出一个完整可用的 run_tool 函数代码给学生"
+    }
+  },
+  {
+    "name": "分档：老同学没有档位，不重新摸底",
+    "progress": { "level": "会一点编程", "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md"], "memories": ["会一点 Python，喜欢动手"] },
+    "input": "继续上课吧",
+    "expect": {
+      "tools": ["get_progress"],
+      "judge": "导师没有把学生当新同学重新摸底（没有问会不会编程、用没用过 ChatGPT 之类的问题），而是告诉学生课程现在分基础档和进阶档、各学什么，给出建议并请学生选择"
+    }
+  },
+  {
+    "name": "分档：基础档学完第 13 课就毕业，介绍选修课",
+    "progress": {
+      "level": "零基础",
+      "track": "基础",
+      "completed": ["01-大模型是什么.md", "02-Prompt怎么写.md", "03-用代码调用API.md", "04-工具调用.md", "05-Agent循环.md", "06-工作流与设计模式.md", "07-记忆与上下文工程.md", "08-RAG知识库.md", "09-让Agent上网.md", "10-MCP与A2A.md", "11-多Agent与框架.md", "12-安全护栏与人工介入.md", "13-评估与上线.md"]
+    },
+    "input": "继续上课吧",
+    "expect": {
+      "tools": ["get_progress"],
+      "judge": "导师没有开始讲第 14 课（生产级 Agent 工程），而是告诉学生基础档的必修课已经学完，并介绍了选修课（编程 Agent、电脑操作 Agent），问学生想不想学"
     }
   }
 ]
