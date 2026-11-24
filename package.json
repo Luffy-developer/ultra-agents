@@ -8,7 +8,8 @@
   },
   "files": [
     "dist",
-    "lessons"
+    "lessons",
+    "evals"
   ],
   "engines": {
     "node": ">=20"

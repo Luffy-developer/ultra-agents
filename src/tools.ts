@@ -1,11 +1,13 @@
 // 工具：Agent 能"动手"做的事。每个工具 = 说明书（给模型看） + run 函数（真正执行）
 import { exec } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type OpenAI from "openai";
 import type { ChatCompletionFunctionTool } from "openai/resources/chat/completions";
 import { forget, progressForModel, remember, saveProgress, updateMemory } from "./memory.js";
+import { TODO_TOOL } from "./todo.js";
+import type { Usage } from "./usage.js";
 import { type SearchConfig, webFetch, webSearch } from "./web.js";
 
 export interface ToolContext {
@@ -16,6 +18,8 @@ export interface ToolContext {
   search?: SearchConfig; // 搜索服务配置，没配置时 web_search 会提示学生去 /setup
   // 危险操作前征求用户同意
   confirm(toolName: string, title: string, detail: string): Promise<boolean>;
+  // 每调用一次模型，报告一次 token 用量（subagent：是不是子 Agent、压缩对话这类不属于主对话的调用）
+  onUsage?(model: string, usage: Omit<Usage, "calls">, subagent?: boolean): void;
 }
 
 export interface Tool {
@@ -61,8 +65,13 @@ function listFiles(args: { path?: string }, ctx: ToolContext) {
     .map((name) => (statSync(join(dir, name)).isDirectory() ? name + "/" : name));
 }
 
-function readFile(args: { path: string }, ctx: ToolContext) {
-  return { content: truncate(readFileSync(insideCwd(ctx, args.path), "utf-8")) };
+function readFile(args: { path: string; offset?: number; limit?: number }, ctx: ToolContext) {
+  const lines = readFileSync(insideCwd(ctx, args.path), "utf-8").split("\n");
+  const start = Math.max(1, Math.floor(args.offset ?? 1));
+  const end = args.limit ? start - 1 + Math.floor(args.limit) : lines.length;
+  const text = lines.slice(start - 1, end).join("\n");
+  const content = text.length > MAX_OUTPUT ? text.slice(0, MAX_OUTPUT) + "\n…（内容过长，已截断。可以用 offset 和 limit 分段读取）" : text;
+  return { content, total_lines: lines.length, ...(start > 1 || end < lines.length ? { from_line: start, to_line: Math.min(end, lines.length) } : {}) };
 }
 
 async function writeFile(args: { path: string; content: string }, ctx: ToolContext) {
@@ -76,6 +85,128 @@ async function writeFile(args: { path: string; content: string }, ctx: ToolConte
   mkdirSync(dirname(full), { recursive: true });
   writeFileSync(full, args.content);
   return { ok: true };
+}
+
+// 修改预览：- 是删掉的行，+ 是改成的行
+function diffPreview(oldText: string, newText: string) {
+  const show = (text: string, sign: string) => {
+    const lines = text.split("\n");
+    return [...lines.slice(0, 10).map((l) => `${sign} ${l}`), ...(lines.length > 10 ? [`${sign} …（共 ${lines.length} 行）`] : [])];
+  };
+  return [...show(oldText, "-"), ...show(newText, "+")].join("\n");
+}
+
+// 精确修改：只把文件里的某一段换掉，不用整个重写（和 Claude Code 的 Edit 工具一样）
+// 要求 old_string 在文件里只出现一次，防止改错地方
+async function editFile(args: { path: string; old_string: string; new_string: string; replace_all?: boolean }, ctx: ToolContext) {
+  const full = insideCwd(ctx, args.path);
+  if (!existsSync(full)) return { error: `文件不存在：${args.path}。新建文件请用 write_file` };
+  if (!args.old_string) return { error: "old_string 不能为空" };
+  if (args.old_string === args.new_string) return { error: "old_string 和 new_string 一模一样，不用改" };
+  const text = readFileSync(full, "utf-8");
+  const count = text.split(args.old_string).length - 1;
+  if (count === 0) return { error: "文件里找不到 old_string。先用 read_file 看看文件现在的内容，空格、缩进、换行都要一模一样" };
+  if (count > 1 && !args.replace_all) {
+    return { error: `old_string 在文件里出现了 ${count} 次，不知道改哪一处。请多带几行上下文让它只出现一次，或者设 replace_all 为 true 全部替换` };
+  }
+  const line = text.slice(0, text.indexOf(args.old_string)).split("\n").length;
+  const where = count > 1 ? `第 ${line} 行等 ${count} 处` : `第 ${line} 行`;
+  if (!(await ctx.confirm("edit_file", `修改文件 ${relative(ctx.cwd, full)}（${where}）`, diffPreview(args.old_string, args.new_string)))) {
+    return { error: "学生拒绝了这次修改，请问问学生原因或换个做法" };
+  }
+  // 用函数做替换：新内容里的 $ 符号不会被当成特殊写法
+  writeFileSync(full, args.replace_all ? text.split(args.old_string).join(args.new_string) : text.replace(args.old_string, () => args.new_string));
+  return { ok: true, replaced: args.replace_all ? count : 1 };
+}
+
+// ---------- 搜索：按文件名找文件（glob）、按内容找代码（grep） ----------
+const MAX_FILES = 5000;
+
+// 列出目录下所有文件（相对路径，用 / 分隔）。跳过 node_modules 等目录和符号链接（防止绕出练习目录）
+function walk(root: string, dir = root, out: string[] = []) {
+  for (const name of readdirSync(dir).sort()) {
+    if (IGNORED.has(name) || out.length >= MAX_FILES) continue;
+    const full = join(dir, name);
+    const st = lstatSync(full);
+    if (st.isDirectory()) walk(root, full, out);
+    else if (st.isFile()) out.push(relative(root, full).split(sep).join("/"));
+  }
+  return out;
+}
+
+// 把 *.js、src/**/*.ts、*.{js,ts} 这样的通配符转成正则
+// * 匹配文件名里的任意字符，** 匹配任意层目录；没有 / 的写法（如 *.js）在所有子目录里找
+export function globToRegex(pattern: string) {
+  let re = "";
+  let braces = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "*" && pattern[i + 1] === "*") {
+      if (pattern[i + 2] === "/") {
+        re += "(?:.*/)?";
+        i += 2;
+      } else {
+        re += ".*";
+        i++;
+      }
+    } else if (ch === "*") re += "[^/]*";
+    else if (ch === "?") re += "[^/]";
+    else if (ch === "{") {
+      braces++;
+      re += "(?:";
+    } else if (ch === "}" && braces > 0) {
+      braces--;
+      re += ")";
+    } else if (ch === "," && braces > 0) re += "|";
+    else re += ch.replace(/[.+^$()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${pattern.includes("/") ? "" : "(?:.*/)?"}${re}$`);
+}
+
+// 搜索的起点：练习目录本身或其中的子目录
+function searchRoot(ctx: ToolContext, path?: string) {
+  const full = insideCwd(ctx, path ?? ".");
+  if (!existsSync(full)) throw new Error(`路径不存在：${path}`);
+  return full;
+}
+
+function globFiles(args: { pattern: string; path?: string }, ctx: ToolContext) {
+  const root = searchRoot(ctx, args.path);
+  const re = globToRegex(args.pattern);
+  const files = walk(root).filter((f) => re.test(f));
+  const prefix = relative(ctx.cwd, root).split(sep).join("/");
+  const paths = files.map((f) => (prefix ? `${prefix}/${f}` : f));
+  return { files: paths.slice(0, 200), total: paths.length, ...(paths.length > 200 && { tip: "结果太多，只列出前 200 个，换个更具体的写法试试" }) };
+}
+
+const MAX_MATCHES = 100;
+
+function grep(args: { pattern: string; path?: string; glob?: string; ignore_case?: boolean }, ctx: ToolContext) {
+  let re: RegExp;
+  try {
+    re = new RegExp(args.pattern, args.ignore_case ? "i" : "");
+  } catch (e) {
+    return { error: `正则表达式写错了：${e instanceof Error ? e.message : e}` };
+  }
+  const root = searchRoot(ctx, args.path);
+  const isFile = statSync(root).isFile();
+  const filter = args.glob ? globToRegex(args.glob) : undefined;
+  const files = isFile ? [relative(ctx.cwd, root)] : walk(root).map((f) => relative(ctx.cwd, join(root, f)));
+  const matches: string[] = [];
+  let total = 0;
+  for (const file of files) {
+    if (filter && !filter.test(file.split(sep).join("/"))) continue;
+    const full = join(ctx.cwd, file);
+    if (statSync(full).size > 1_000_000) continue; // 太大的文件跳过
+    const text = readFileSync(full, "utf-8");
+    if (text.slice(0, 8000).includes("\0")) continue; // 图片之类的二进制文件跳过
+    text.split("\n").forEach((line, i) => {
+      if (!re.test(line)) return;
+      total++;
+      if (matches.length < MAX_MATCHES) matches.push(`${file.split(sep).join("/")}:${i + 1}: ${line.trim().slice(0, 200)}`);
+    });
+  }
+  return { matches, total, ...(total > MAX_MATCHES && { tip: `共 ${total} 处，只列出前 ${MAX_MATCHES} 处，可以用 path 或 glob 缩小范围` }) };
 }
 
 async function runCommand(args: { command: string }, ctx: ToolContext) {
@@ -145,6 +276,7 @@ export const TOOLS: Tool[] = [
     parameters: { type: "object", properties: { filename: str("课程文件名，如 01-大模型是什么.md") }, required: ["filename"] },
     run: (args) => readLesson(args.filename),
   },
+  TODO_TOOL,
   {
     name: "list_files",
     description: "列出学生练习目录（或其子目录）里的文件",
@@ -153,19 +285,65 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "read_file",
-    description: "读取学生练习目录里的文件内容",
-    parameters: { type: "object", properties: { path: str("相对路径") }, required: ["path"] },
+    description: "读取学生练习目录里的文件内容。文件很长时可以用 offset、limit 分段读",
+    parameters: {
+      type: "object",
+      properties: {
+        path: str("相对路径"),
+        offset: { type: "integer", description: "从第几行开始读（从 1 开始），不填从头读" },
+        limit: { type: "integer", description: "最多读几行，不填读到结尾" },
+      },
+      required: ["path"],
+    },
     run: readFile,
   },
   {
     name: "write_file",
-    description: "在学生练习目录里新建或覆盖一个文件（会先征求学生同意）",
+    description: "在学生练习目录里新建文件，或把整个文件重写（会先征求学生同意）。只改文件里的一部分时用 edit_file",
     parameters: {
       type: "object",
       properties: { path: str("相对路径"), content: str("完整的文件内容") },
       required: ["path", "content"],
     },
     run: writeFile,
+  },
+  {
+    name: "edit_file",
+    description:
+      "精确修改已有文件：把文件里的 old_string 换成 new_string，文件其余部分不动（会先征求学生同意）。" +
+      "改之前先用 read_file 看文件内容；old_string 要和文件里一模一样（包括空格和缩进），并且只出现一次，不唯一时多带几行上下文",
+    parameters: {
+      type: "object",
+      properties: {
+        path: str("相对路径"),
+        old_string: str("要被替换的原文"),
+        new_string: str("替换成的新内容"),
+        replace_all: { type: "boolean", description: "为 true 时替换所有出现的地方（比如给变量改名），默认 false" },
+      },
+      required: ["path", "old_string", "new_string"],
+    },
+    run: editFile,
+  },
+  {
+    name: "glob",
+    description: "按文件名查找练习目录里的文件，如 *.js（所有子目录里的 js 文件）、src/**/*.ts、*.{js,ts}",
+    parameters: { type: "object", properties: { pattern: str("文件名通配符"), path: str("在哪个子目录里找，默认整个练习目录") }, required: ["pattern"] },
+    run: globFiles,
+  },
+  {
+    name: "grep",
+    description: "按内容搜索练习目录里的文件（支持正则表达式），返回「文件:行号: 这一行」。找某个函数、变量、报错信息在哪时用",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: str("要搜的内容（正则表达式），如 fetch\\( 或 function\\s+main"),
+        path: str("在哪个子目录或文件里搜，默认整个练习目录"),
+        glob: str("只搜文件名符合这个通配符的文件，如 *.js"),
+        ignore_case: { type: "boolean", description: "是否忽略大小写" },
+      },
+      required: ["pattern"],
+    },
+    run: grep,
   },
   {
     name: "run_command",

@@ -41,6 +41,8 @@ export const COMMANDS: Command[] = [
   },
   { name: "clear", description: "开始新对话（学习进度和记忆不会丢，之前的对话会保存）" },
   { name: "compact", description: "把当前对话压缩成摘要（对话很长、回答变慢时用）" },
+  { name: "todos", description: "查看导师正在做的待办清单" },
+  { name: "cost", description: "查看本次启动以来用了多少 token、花了多少钱" },
   {
     name: "mcp",
     description: "查看已连接的 MCP 服务器和工具",
@@ -74,7 +76,10 @@ export function helpText() {
     "命令（输入 / 会弹出命令菜单，↑↓ 选择、Tab 补全）：",
     ...lines,
     "正在回答时按 Ctrl+C 可以打断。",
-    "启动参数：agent-tutor --continue 接着这个目录里上次的对话",
+    "启动参数：",
+    "  agent-tutor --continue        接着这个目录里上次的对话",
+    '  agent-tutor -p "问题"          不进入对话，回答完就退出（适合写脚本）',
+    "  agent-tutor --eval [文件]      运行自动化评估（--only 名字 只跑部分题，-v 显示导师的回答）",
   ].join("\n");
 }
 

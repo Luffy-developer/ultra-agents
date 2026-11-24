@@ -49,6 +49,8 @@ agent-tutor
 | `/clear` | 开始新对话（学习进度和记忆不会丢，之前的对话会保存） |
 | `/resume [序号]` | 从历史对话里挑一个接着聊 |
 | `/compact` | 把当前对话压缩成摘要（对话太长时也会自动压缩） |
+| `/todos` | 查看导师正在做的待办清单 |
+| `/cost` | 查看本次启动以来用了多少 token、花了多少钱 |
 | `/setup` | 修改模型和搜索服务配置 |
 | `/mcp [服务器名]` | 查看已连接的 MCP 服务器；加服务器名查看每个工具的说明 |
 | `/agents [名字]` | 查看导师可以派出的子 Agent；加名字查看人设和能用的工具 |
@@ -57,6 +59,60 @@ agent-tutor
 | Ctrl+C | 打断正在进行的回答 |
 
 想接着上次的对话聊：`agent-tutor --continue`（或 `-c`）。
+不进入对话、问一句就退出：`agent-tutor -p "什么是 Agent？"`（回答输出到 stdout，适合写脚本；需要确认的操作一律拒绝）。
+
+### 导师能做的事
+
+- **讲课**：按讲义一节节教，派出题官出题检验，记住你的薄弱点
+- **动手**：在练习目录里新建文件（`write_file`）、只改某几行（`edit_file`）、按文件名找文件（`glob`）、按内容搜代码（`grep`）、运行命令
+- **规划**：做 3 步以上的任务时，先列出「📋 待办清单」，做一项勾一项
+- **上网**：搜索、读网页；通过 MCP 和子 Agent 还能做更多
+
+### 用量和花费
+
+导师每说完一轮，下面会有一行灰字显示这一轮的用量，例如 `↳ 调用模型 3 次 · 输入 12.3k（缓存 8.0k） · 输出 456 · 约 ¥0.0123`，
+输入 `/cost` 查看总账。想看到花了多少钱，在 `/setup` 里填写模型价格（每百万 token 的「输入价/输出价/缓存价」）。
+子 Agent 用了别的模型时，在 `config.json` 的 `prices` 里按模型名补上：
+
+```json
+"prices": { "主模型名": { "input": 2, "output": 8, "cached": 0.5 }, "小模型名": { "input": 0.3, "output": 0.6 } },
+"currency": "¥"
+```
+
+个别模型服务不返回用量，这时就不显示。
+
+### 自动化评估
+
+```bash
+agent-tutor --eval                  # 跑一遍内置的测试题（evals/cases.json）
+agent-tutor --eval --only 安全       # 只跑名字里带「安全」的题
+agent-tutor --eval 我的题.json -v    # 用自己的测试题，并显示导师的每一句回答
+JUDGE_MODEL=更强的模型 agent-tutor --eval   # 评委换一个更强的模型
+```
+
+每道题用假的学习进度和临时练习目录，不会改动你真正的进度和文件。评估时允许导师在临时目录里写文件、改文件，运行命令和 MCP 工具一律拒绝。
+测试题的写法（完整例子见 `evals/cases.json`）：
+
+```json
+{
+  "name": "精确修改：只改需要改的地方",
+  "progress": { "level": "入门", "completed": ["01-大模型是什么.md"] },
+  "files": { "hello.js": "const name = \"World\";\n" },
+  "input": "帮我把 hello.js 里的 World 改成 小白",
+  "expect": {
+    "tools": ["edit_file"],
+    "notTools": ["write_file"],
+    "files": { "hello.js": "小白" },
+    "judge": "导师改之前先说明了要做什么"
+  }
+}
+```
+
+- `input` 写成数组就是多轮对话
+- `tools`：必须调用过的工具，`"a|b"` 表示调用其中一个就行，`"task:quiz-maker"` 表示派了出题官
+- `contains` / `notContains`：回答里必须有 / 不能有的文字；`files`：跑完后文件里必须包含的文字
+- `judge`：评分标准，交给评委模型判断
+- 报告保存在 `~/.agent-tutor/evals/`；有题没通过时退出码为 1，方便以后接到 CI 里自动跑
 
 ### 说明文件 TUTOR.md（可选）
 
@@ -126,7 +182,11 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 | `src/agent.ts` | Agent 本体：导师人设（System Prompt）+ Agent 循环（`runTurn`，流式输出）+ 对话压缩 |
 | `src/memory.ts` | 长期记忆：学习进度、可增删改的记忆条目、读取 TUTOR.md |
 | `src/session.ts` | 会话存档与恢复 |
-| `src/tools.ts` | 工具清单：学习进度与记忆、课程讲义、练习目录里的文件和命令、网页工具 |
+| `src/tools.ts` | 工具清单：学习进度与记忆、课程讲义、练习目录里的文件（读、写、精确修改、glob、grep）和命令、网页工具 |
+| `src/todo.ts` | 待办清单工具 `todo_write`（规划能力） |
+| `src/usage.ts` | token 用量统计和花费计算 |
+| `src/eval.ts` | 自动化评估：跑测试题、规则检查、评委模型打分 |
+| `evals/cases.json` | 内置的测试题 |
 | `src/subagents.ts` | 子 Agent：内置和自定义子 Agent 的定义，以及派活用的 `task` 工具 |
 | `src/web.ts` | 网页工具：`web_search` 调用搜索 API，`web_fetch` 读取网页正文 |
 | `src/mcp.ts` | MCP 客户端：连接 MCP 服务器，把它们的工具接进导师的工具列表 |
@@ -144,8 +204,9 @@ npm run build       # 编译；npm link 过的全局命令会用到最新的编�
 - `TUTOR.md`：你写给导师的说明（可选）
 - `progress.json`：学习进度和导师对你的记忆（删掉即可从头开始）
 - `sessions/`：对话存档，只保留最近 30 个
+- `evals/`：自动化评估的报告
 
 ## 后续可以做的
-1. 准备一组测试提问，做自动化评估（第 11 课）
-2. 课程多了以后，把 `read_lesson` 升级为向量检索（RAG，第 7 课）
+1. 课程多了以后，把 `read_lesson` 升级为向量检索（RAG，第 7 课）
+2. 出题官出完题，再派一个「审题官」子 Agent 检查答案（反思）
 3. 发布到 npm，让别人 `npm install -g agent-tutor` 就能用

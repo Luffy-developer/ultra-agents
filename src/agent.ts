@@ -1,13 +1,14 @@
 // Agent 本体：人设 + Agent 循环（第 5 课）
-import type OpenAI from "openai";
+import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { loadInstructions } from "./memory.js";
 import { toolSchemas, TOOLS, type Tool, type ToolContext } from "./tools.js";
+import { readUsage } from "./usage.js";
 
 export type Message = ChatCompletionMessageParam;
 
-export function systemPrompt(cwd: string) {
-  const instructions = loadInstructions(cwd);
+// instructions：学生写的 TUTOR.md，默认从文件读取（自动化评估时会传入测试用的内容）
+export function systemPrompt(cwd: string, instructions = loadInstructions(cwd)) {
   return `你是一位耐心的「AI Agent 入门导师」，在学生的终端里一对一教学，学生是纯小白。
 学生的练习目录：${cwd}
 
@@ -26,6 +27,8 @@ export function systemPrompt(cwd: string) {
    记忆只写对以后上课有用的事，不要记聊天里的琐事，也绝不要记 API Key 等敏感信息。
 6. 学生问课程以外的问题也可以回答，但答完引导回当前课程。
 7. 动手环节：讲义里有代码或练习时，可以用 write_file 在练习目录创建文件、用 run_command 运行，带学生边学边做。
+   改已有的文件用 edit_file 只改需要改的那几行，不要用 write_file 整个重写；改之前先 read_file 看清楚现在的内容。
+   要找文件用 glob，要找某段代码、某个报错在哪用 grep，不要一个个文件去读。
    每次动手前先用一句话说明要做什么、为什么；运行结果要解释给学生听。
    绝不要读取、打印或要求学生发送 API Key；需要 key 的地方用占位符，让学生自己填。
 8. 上网：讲义没讲到的新知识、最新资讯，或学生要求查资料时，用 web_search 搜索，需要细节再用 web_fetch 读原文。
@@ -42,7 +45,10 @@ export function systemPrompt(cwd: string) {
    子 Agent 看不到你们的聊天记录，prompt 里要把任务背景、要求和想要的结果写清楚。
    简单的事（读一节讲义、搜一次）自己做就行，不要为了派而派。
    子 Agent 交回的结果是给你看的，学生看不到，要用你自己的话讲给学生。
-   讲到第 10 课（多 Agent）时，可以现场派一个子 Agent 做演示。${
+   讲到第 10 课（多 Agent）时，可以现场派一个子 Agent 做演示。
+13. 规划（todo_write 工具）：要做 3 步以上的任务时（带学生完成一个完整练习、修好一段报错的代码、给学生定学习计划），
+   先用 todo_write 列出步骤再动手。开始做某一步时把它标成 in_progress，做完马上标成 completed，同一时间只有一项 in_progress。
+   简单的问答、讲一个知识点不用列清单。${
     instructions
       ? `
 
@@ -61,20 +67,35 @@ export interface AgentEvents {
 const MAX_STEPS = 20; // 防止模型无限调用工具（第 5 课的小测验）
 const MAX_HISTORY_CHARS = 200_000; // 短期记忆上限（第 6 课），超过就压缩对话
 
+// 流式输出时，要加 stream_options.include_usage 才会在最后返回 token 用量。
+// 个别 OpenAI 兼容服务不认这个参数，报错一次后就不再带它（这时看不到用量，但不影响使用）
+let usageSupported = true;
+
+async function createStream(messages: Message[], ctx: ToolContext, tools: Tool[]) {
+  const request = { model: ctx.model, messages, tools: toolSchemas(tools), stream: true as const };
+  if (!usageSupported) return ctx.client.chat.completions.create(request, { signal: ctx.signal });
+  try {
+    return await ctx.client.chat.completions.create({ ...request, stream_options: { include_usage: true } }, { signal: ctx.signal });
+  } catch (e) {
+    if (!(e instanceof OpenAI.APIError && e.status === 400 && /stream_options|include_usage/i.test(e.message))) throw e;
+    usageSupported = false;
+    return ctx.client.chat.completions.create(request, { signal: ctx.signal });
+  }
+}
+
 // 处理一轮用户输入：循环"调用模型 → 执行工具"，直到模型给出最终回答。messages 会被原地追加。
 // tools：这个 Agent 能用哪些工具（子 Agent 只能用分配给它的那几个）
 // 返回最终回答；步骤太多被强制停止时返回 undefined
 export async function runTurn(messages: Message[], ctx: ToolContext, events: AgentEvents, tools: Tool[] = TOOLS) {
   for (let step = 0; step < MAX_STEPS; step++) {
-    const stream = await ctx.client.chat.completions.create(
-      { model: ctx.model, messages, tools: toolSchemas(tools), stream: true },
-      { signal: ctx.signal },
-    );
+    const stream = await createStream(messages, ctx, tools);
 
     // 流式返回的是一个个碎片，要自己拼起来：文字直接显示，工具调用按 index 拼接
     let content = "";
+    let usage: unknown;
     const calls: { id: string; name: string; args: string }[] = [];
     for await (const chunk of stream) {
+      if (chunk.usage) usage = chunk.usage; // 用量在最后一个碎片里（有的服务每个碎片都带，取最后一次）
       const delta = chunk.choices[0]?.delta;
       if (!delta) continue;
       if (delta.content) {
@@ -89,6 +110,8 @@ export async function runTurn(messages: Message[], ctx: ToolContext, events: Age
       }
     }
     ctx.signal.throwIfAborted(); // 被 Ctrl+C 打断时流会悄悄结束，这里主动报错，让外层回滚这一轮
+    const used = readUsage(usage);
+    if (used) ctx.onUsage?.(ctx.model, used);
 
     if (calls.length === 0) {
       messages.push({ role: "assistant", content });
@@ -174,7 +197,7 @@ export function needsCompaction(messages: Message[]) {
 
 // 压缩对话：返回被总结掉的消息条数（0 表示对话太短，不用压缩）
 // 默认保留最近两轮原文；如果最近两轮本身就很长，只保留最近一轮
-export async function compactHistory(messages: Message[], ctx: Pick<ToolContext, "client" | "model" | "signal">) {
+export async function compactHistory(messages: Message[], ctx: Pick<ToolContext, "client" | "model" | "signal" | "onUsage">) {
   let cut = splitPoint(messages, 2);
   if (cut === -1 || historySize(messages.slice(cut)) > MAX_HISTORY_CHARS / 2) cut = splitPoint(messages, 1);
   if (cut === -1) return 0;
@@ -189,6 +212,8 @@ export async function compactHistory(messages: Message[], ctx: Pick<ToolContext,
     },
     { signal: ctx.signal },
   );
+  const used = readUsage(resp.usage);
+  if (used) ctx.onUsage?.(ctx.model, used);
   const summary = resp.choices[0]?.message.content?.trim();
   if (!summary) throw new Error("总结失败：模型没有返回内容");
   messages.splice(1, cut - 1, {

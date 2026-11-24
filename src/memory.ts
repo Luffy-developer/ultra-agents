@@ -22,7 +22,16 @@ export interface Progress {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+// 自动化评估时用：进度只存在内存里，每道测试题用自己的假进度，不读写学生真正的 progress.json
+let inMemory: Progress | null = null;
+
+export function useInMemoryProgress(p: { level?: string; completed?: string[]; memories?: string[] } = {}) {
+  const memories = (p.memories ?? []).map((content, i) => ({ id: `m${i + 1}`, content, updated: today() }));
+  inMemory = { level: p.level ?? "未评估", completed: p.completed ?? [], memories, nextId: memories.length + 1 };
+}
+
 export function getProgress(): Progress {
+  if (inMemory) return structuredClone(inMemory);
   if (!existsSync(PROGRESS_FILE)) return { level: "未评估", completed: [], memories: [], nextId: 1 };
   const p = JSON.parse(readFileSync(PROGRESS_FILE, "utf-8"));
   p.memories ??= [];
@@ -37,6 +46,10 @@ export function getProgress(): Progress {
 }
 
 function writeProgress(p: Progress) {
+  if (inMemory) {
+    inMemory = structuredClone(p);
+    return;
+  }
   mkdirSync(DATA_DIR, { recursive: true });
   writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
 }

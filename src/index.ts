@@ -11,10 +11,13 @@ import { attachCompletion } from "./input.js";
 import { MarkdownStream, plainText } from "./markdown.js";
 import { closeMcpServers, connectMcpServers, MCP_CONFIG_FILE, mcpStatuses } from "./mcp.js";
 import { getProgress, instructionFiles } from "./memory.js";
+import { runEval } from "./eval.js";
 import { cleanupSessions, latestSession, loadSession, newSessionId, saveSession } from "./session.js";
 import { agentDirs, loadAgents, taskTool, toolsFor } from "./subagents.js";
+import { clearTodos, printTodos, restoreTodos } from "./todo.js";
 import { listLessons, registerTools, type ToolContext } from "./tools.js";
-import { c, newline, printConfirm, printToolCall, textWidth, write } from "./ui.js";
+import { c, newline, printConfirm, printToolCall, setMuted, textWidth, write } from "./ui.js";
+import { costOf, formatTokens, UsageMeter, usageLine } from "./usage.js";
 import { webSearch } from "./web.js";
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
@@ -151,9 +154,101 @@ async function setupMcp() {
   }
 }
 
+// /cost：本次启动以来每个模型用了多少 token、花了多少钱
+function showCost(meter: UsageMeter, config: Partial<Config>) {
+  if (meter.byModel.size === 0) {
+    write(c.dim("\n还没有用量记录。如果已经聊过几轮还是没有，说明这个模型服务不返回用量。\n"));
+    return;
+  }
+  const prices = config.prices ?? {};
+  write(c.bold("\n本次启动以来的用量\n"));
+  for (const [model, u] of meter.byModel) {
+    const cost = costOf(u, prices[model]);
+    write(`  ${c.cyan(model)}  ${c.dim(`调用 ${u.calls} 次 · `)}${usageLine(u, cost, config.currency)}${cost === undefined ? c.dim("（没填价格）") : ""}\n`);
+  }
+  if (meter.byModel.size > 1) write(`  合计  ${usageLine(meter.total(), meter.cost(prices), config.currency)}\n`);
+  if (meter.lastContext) write(c.dim(`\n现在的对话约 ${formatTokens(meter.lastContext)} token：下一次调用模型时，这些内容要全部再发一遍\n`));
+  write(c.dim("小知识：输入 token 每一轮都会重复计费，对话越长越贵；/compact 压缩对话、把任务派给子 Agent 都能省输入 token。\n"));
+  if (meter.byModel.size > 0 && [...meter.byModel.keys()].some((m) => !prices[m])) {
+    write(c.dim(`想看花了多少钱：输入 /setup 填写模型价格；子 Agent 用了别的模型的话，在配置文件的 prices 里按模型名补上\n`));
+  }
+}
+
+// agent-tutor -p "问题"：不进入对话，回答完就退出。回答输出到 stdout，其他提示输出到 stderr，方便写脚本调用
+async function printMode(prompt: string) {
+  const config = loadConfig();
+  if (!isComplete(config)) {
+    process.stderr.write("还没有配置模型，请先运行：agent-tutor --setup\n");
+    process.exit(1);
+  }
+  const cwd = process.cwd();
+  registerTools([taskTool(cwd)]);
+  const meter = new UsageMeter();
+  const ctx: ToolContext = {
+    client: new OpenAI({ apiKey: config.apiKey || "EMPTY", baseURL: config.baseURL }),
+    model: config.model,
+    cwd,
+    signal: new AbortController().signal,
+    search: searchConfig(config),
+    // 没人在旁边回答"允许吗"，需要确认的操作一律拒绝
+    confirm: async (_tool, title) => {
+      process.stderr.write(`（-p 模式不执行需要确认的操作，已拒绝：${title}）\n`);
+      return false;
+    },
+    onUsage: (model, usage) => meter.add(model, usage),
+  };
+  setMuted(true); // 待办清单、子 Agent 进度这些提示不输出到 stdout
+  const messages: Message[] = [
+    { role: "system", content: systemPrompt(cwd) },
+    { role: "user", content: prompt },
+  ];
+  try {
+    await runTurn(messages, ctx, { onText: (delta) => process.stdout.write(delta), onToolCall: () => {} });
+    process.stdout.write("\n");
+    if (meter.byModel.size) process.stderr.write(`（${usageLine(meter.total(), meter.cost(config.prices), config.currency)}）\n`);
+  } catch (e) {
+    process.stderr.write(`出错了：${explainError(e)}\n`);
+    process.exit(1);
+  }
+}
+
+// agent-tutor --eval [测试题文件] [--only 名字] [-v]
+async function evalMode(args: string[]) {
+  const config = loadConfig();
+  if (!isComplete(config)) {
+    write(c.red("还没有配置模型，请先运行：agent-tutor --setup") + "\n");
+    process.exit(1);
+  }
+  let file: string | undefined;
+  let only: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--only") only = args[++i];
+    else if (!args[i].startsWith("-")) file ??= args[i];
+  }
+  registerTools([taskTool(process.cwd())]);
+  try {
+    const failed = await runEval(config, { file, only, verbose: args.includes("-v") });
+    process.exit(failed ? 1 : 0);
+  } catch (e) {
+    write(c.red(`评估失败：${explainError(e)}`) + "\n");
+    process.exit(1);
+  }
+}
+
 async function main() {
   const testIndex = process.argv.indexOf("--test-search");
   if (testIndex !== -1) return testSearch(process.argv.slice(testIndex + 1).join(" ") || "AI Agent 是什么");
+  const evalIndex = process.argv.indexOf("--eval");
+  if (evalIndex !== -1) return evalMode(process.argv.slice(evalIndex + 1));
+  const printIndex = process.argv.findIndex((a) => a === "-p" || a === "--print");
+  if (printIndex !== -1) {
+    const prompt = process.argv.slice(printIndex + 1).join(" ").trim();
+    if (!prompt) {
+      process.stderr.write('用法：agent-tutor -p "你的问题"\n');
+      process.exit(1);
+    }
+    return printMode(prompt);
+  }
 
   // escapeCodeTimeout：单独按 Esc 时，终端要等一会儿才能确定不是方向键等组合键的开头，默认等 500 毫秒，太慢了
   const rl = createInterface({ input: stdin, output: stdout, escapeCodeTimeout: 50 });
@@ -179,12 +274,22 @@ async function main() {
   const alwaysAllowed = new Set<string>(); // 学生选了"本次都允许"的工具
   cleanupSessions();
 
+  // token 用量：meter 累计本次启动以来的，turnMeter 只记这一轮的（每轮回答完显示一行）
+  const meter = new UsageMeter();
+  let turnMeter = new UsageMeter();
+  const onUsage = (model: string, usage: { input: number; output: number; cached: number }, subagent?: boolean) => {
+    meter.add(model, usage);
+    turnMeter.add(model, usage);
+    if (!subagent) meter.lastContext = usage.input;
+  };
+
   function resume(id: string) {
     const session = loadSession(id);
     if (!session) return false;
     messages = newConversation(session.messages);
     sessionId = session.id;
     alwaysAllowed.clear();
+    restoreTodos(session.messages);
     const lastReply = [...session.messages].reverse().find((m) => m.role === "assistant" && typeof m.content === "string" && m.content);
     write(c.dim(`\n已恢复 ${formatTime(session.updated)} 的对话「${session.title}」\n`));
     if (lastReply) write(c.dim(`导师上次说到：${plainText(String(lastReply.content)).slice(-120)}\n`));
@@ -214,7 +319,7 @@ async function main() {
   async function compact(signal: AbortSignal, manual: boolean) {
     write(c.dim(manual ? "正在压缩对话……\n" : "\n对话有点长了，正在把旧内容整理成摘要……\n"));
     try {
-      const count = await compactHistory(messages, { client, model: config.model!, signal });
+      const count = await compactHistory(messages, { client, model: config.model!, signal, onUsage: (m, u) => onUsage(m, u, true) });
       if (count === 0 && manual) write(c.dim("对话还很短，不用压缩。\n"));
       if (count > 0) write(c.dim(`已把 ${count} 条旧消息压缩成一份摘要，最近的对话保留原文。\n`));
       if (needsCompaction(messages)) trimHistory(messages); // 还是太长（很少见），只能丢掉最早的内容
@@ -289,6 +394,8 @@ async function main() {
       else if (cmd === "progress") showProgress();
       else if (cmd === "mcp") showMcp(arg);
       else if (cmd === "agents") showAgents(cwd, arg);
+      else if (cmd === "cost") showCost(meter, config);
+      else if (cmd === "todos") printTodos();
       else if (cmd === "memory") showMemory(cwd);
       else if (cmd === "resume") await pickSession(arg);
       else if (cmd === "compact") {
@@ -304,6 +411,7 @@ async function main() {
         messages = newConversation();
         sessionId = newSessionId();
         alwaysAllowed.clear();
+        clearTodos();
         write(c.dim("已开始新对话（之前的对话已保存，可以用 /resume 找回）。\n"));
       } else if (cmd === "setup") {
         config = await runSetup(rl);
@@ -331,7 +439,9 @@ async function main() {
       signal: controller.signal,
       confirm,
       search: searchConfig(config),
+      onUsage,
     };
+    turnMeter = new UsageMeter();
 
     const prefix = "导师 › ";
     write("\n" + c.bold(c.cyan(prefix)));
@@ -356,6 +466,12 @@ async function main() {
       else write(c.red(`出错了：${explainError(e)}`) + "\n");
     } finally {
       controller = null;
+      // 这一轮用了多少 token（被打断的也算，钱已经花了）
+      if (turnMeter.byModel.size) {
+        const u = turnMeter.total();
+        const calls = u.calls > 1 ? `调用模型 ${u.calls} 次 · ` : "";
+        write(c.dim(`  ↳ ${calls}${usageLine(u, turnMeter.cost(config.prices), config.currency)}`) + "\n");
+      }
     }
   }
 }

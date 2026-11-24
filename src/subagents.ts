@@ -19,7 +19,8 @@ export interface AgentDef {
   source: string; // 定义在哪："内置"或文件路径
 }
 
-const NEVER = new Set(["task"]); // 子 Agent 不能再派子 Agent，防止无限套娃
+// 子 Agent 不能再派子 Agent（防止无限套娃）；待办清单是导师和学生共用的，也只由导师来维护
+const NEVER = new Set(["task", "todo_write"]);
 const MAIN_ONLY = new Set(["save_progress", "remember", "update_memory", "forget"]); // 学生的进度和记忆默认只由导师来改
 const MAX_RESULT = 20_000;
 
@@ -134,6 +135,7 @@ async function runSubagent(args: { agent: string; description?: string; prompt: 
     model: agent.model ?? ctx.model,
     // 征求同意时告诉学生是哪个子 Agent 要做这件事
     confirm: (tool, title, detail) => ctx.confirm(tool, `${title}（子 Agent ${agent.name} 发起）`, detail),
+    onUsage: (model, usage) => ctx.onUsage?.(model, usage, true),
   };
   const messages: Message[] = [
     { role: "system", content: subagentPrompt(agent, ctx.cwd) },

@@ -60,9 +60,15 @@ export const termColumns = () => process.stdout.columns || 80;
 
 // 记录光标是否在行首，避免工具提示和文字挤在同一行
 let atLineStart = true;
+let muted = false;
+
+// 自动化评估时关掉导师的各种提示（待办清单、子 Agent 进度），只显示评估结果
+export function setMuted(value: boolean) {
+  muted = value;
+}
 
 export function write(text: string) {
-  if (!text) return;
+  if (!text || muted) return;
   process.stdout.write(text);
   atLineStart = text.endsWith("\n");
 }
@@ -76,12 +82,13 @@ function toolSummary(rawArgs: string) {
   let summary = rawArgs;
   try {
     const args = JSON.parse(rawArgs || "{}");
-    summary = args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? (Object.keys(args).length ? JSON.stringify(args) : "");
+    summary = args.command ?? args.path ?? args.filename ?? args.query ?? args.url ?? args.pattern ?? (Object.keys(args).length ? JSON.stringify(args) : "");
   } catch {}
   return summary.length > 80 ? summary.slice(0, 80) + "…" : summary;
 }
 
 export function printToolCall(name: string, rawArgs: string) {
+  if (name === "todo_write") return; // 待办清单工具自己会把清单画出来
   newline();
   if (name === "task") {
     let args: any = {};
